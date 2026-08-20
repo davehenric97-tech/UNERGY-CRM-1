@@ -62,6 +62,69 @@ async function genUniqueSubmitCode() {
 }
 function normEmail(e) { return (e || "").trim().toLowerCase(); }
 
+// ---------- grid status (server-side fetch to gridstatus.io — API key never reaches the browser) ----------
+function niceLabel(key) {
+  return String(key).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function pickColumns(row) {
+  let tsKey = null;
+  const valueKeys = [];
+  Object.keys(row).forEach((k) => {
+    const lk = k.toLowerCase();
+    const v = row[k];
+    if (tsKey === null && (lk.includes("time") || lk.includes("date") || lk.includes("interval"))) { tsKey = k; return; }
+    if (typeof v === "number") valueKeys.push(k);
+  });
+  return { tsKey, valueKeys };
+}
+async function gridstatusQuery(datasetId, apiKey, params) {
+  const qs = new URLSearchParams({ api_key: apiKey, ...params }).toString();
+  const url = `https://api.gridstatus.io/v1/datasets/${datasetId}/query?${qs}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("gridstatus.io returned " + res.status);
+  const json = await res.json();
+  return Array.isArray(json) ? json : (json.data || []);
+}
+async function fetchGridStatus() {
+  const apiKey = process.env.GRIDSTATUS_API_KEY;
+  if (!apiKey) return { available: false, reason: "no_api_key" };
+  const now = new Date();
+  const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const timeParams = { start_time: start.toISOString(), end_time: now.toISOString() };
+
+  let price = null, priceLabel = null, series = [];
+  try {
+    const rows = await gridstatusQuery("ercot_spp_day_ahead_hourly", apiKey, { ...timeParams, limit: 300 });
+    if (rows.length) {
+      const cols = pickColumns(rows[0]);
+      if (cols.valueKeys.length) {
+        const valKey = cols.valueKeys[0];
+        series = rows.map((r) => parseFloat(r[valKey])).filter((v) => !isNaN(v));
+        price = series.length ? series[series.length - 1] : null;
+        priceLabel = niceLabel(valKey);
+      }
+    }
+  } catch (e) { /* price section stays empty if this fails */ }
+
+  let fuelMix = null;
+  try {
+    const rows = await gridstatusQuery("ercot_fuel_mix", apiKey, { ...timeParams, limit: 50 });
+    if (rows.length) {
+      const latest = rows[rows.length - 1];
+      const cols = pickColumns(latest);
+      const mix = {};
+      cols.valueKeys.forEach((k) => {
+        const v = parseFloat(latest[k]);
+        if (!isNaN(v) && v > 0) mix[k] = v;
+      });
+      if (Object.keys(mix).length) fuelMix = mix;
+    }
+  } catch (e) { /* fuel mix is best-effort */ }
+
+  if (price === null && !fuelMix) return { available: false, reason: "fetch_failed" };
+  return { available: true, price, priceLabel, series, fuelMix, fetchedAt: new Date().toISOString() };
+}
+
 // ---------- session tokens (signed, stateless — no server-side session storage needed) ----------
 function signToken(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -409,6 +472,12 @@ exports.handler = async (event) => {
         return ok(cors, { messagesByCompany: byCompany });
       }
 
+      case "getGridStatus": {
+        if (!session) { const e = new Error("Unauthorized"); e.status = 401; throw e; }
+        const data = await fetchGridStatus();
+        return ok(cors, data);
+      }
+
       case "sendMessage": {
         requireCompanyAccess(session, p.companyId);
         const isAdmin = session.role === "admin";
@@ -435,5 +504,6 @@ exports.handler = async (event) => {
 
 function ok(cors, data) {
   return { statusCode: 200, headers: { ...cors, "Content-Type": "application/json" }, body: JSON.stringify(data) };
+}
 }
        
