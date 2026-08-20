@@ -7,7 +7,11 @@ const crypto = require("crypto");
 const { getStore } = require("@netlify/blobs");
 
 const SECRET = process.env.SESSION_SECRET || "change-this-secret-before-real-use";
-const store = () => getStore("unergy-data");
+const store = () => getStore({
+  name: "unergy-data",
+  siteID: process.env.NETLIFY_SITE_ID,
+  token: process.env.NETLIFY_BLOBS_TOKEN,
+});
 
 // ---------- storage helpers ----------
 async function getJSON(key) {
@@ -432,3 +436,4 @@ exports.handler = async (event) => {
 function ok(cors, data) {
   return { statusCode: 200, headers: { ...cors, "Content-Type": "application/json" }, body: JSON.stringify(data) };
 }
+       
