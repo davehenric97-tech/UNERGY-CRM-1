@@ -404,4 +404,144 @@ exports.handler = async (event) => {
         if (await getJSON("login-" + email)) { const e = new Error("That email is already registered"); e.status = 409; throw e; }
         const team = (await getJSON("admin-team")) || [];
         const salt = randomSalt();
-        const hash = hashPassword(p.password,
+        const hash = hashPassword(p.password, salt);
+        const member = { id: "mem_" + crypto.randomBytes(4).toString("hex"), name: p.name, email };
+        team.push(member);
+        await setJSON("admin-team", team);
+        await setJSON("login-" + email, {
+          type: "admin", personId: member.id, personName: p.name, personEmail: email, passwordHash: hash, salt,
+        });
+        return ok(cors, { team: team.map((m) => ({ id: m.id, name: m.name, email: m.email })) });
+      }
+
+      case "removeAdminMember": {
+        requireAdmin(session);
+        const team = (await getJSON("admin-team")) || [];
+        const member = team.find((m) => m.id === p.memberId);
+        if (member) await del("login-" + normEmail(member.email));
+        const next = team.filter((m) => m.id !== p.memberId);
+        await setJSON("admin-team", next);
+        return ok(cors, { team: next.map((m) => ({ id: m.id, name: m.name, email: m.email })) });
+      }
+
+      case "resetAdminMemberPassword": {
+        requireAdmin(session);
+        if (!p.newPassword || p.newPassword.length < 8) {
+          const e = new Error("New password must be at least 8 characters"); e.status = 400; throw e;
+        }
+        const team = (await getJSON("admin-team")) || [];
+        const member = team.find((m) => m.id === p.memberId);
+        if (!member) { const e = new Error("Member not found"); e.status = 404; throw e; }
+        const salt = randomSalt();
+        const hash = hashPassword(p.newPassword, salt);
+        const loginKey = "login-" + normEmail(member.email);
+        const entry = await getJSON(loginKey);
+        entry.passwordHash = hash; entry.salt = salt;
+        await setJSON(loginKey, entry);
+        return ok(cors, { done: true });
+      }
+
+      case "getDeals": {
+        requireCompanyAccess(session, p.companyId);
+        const deals = (await getJSON("deals-" + p.companyId)) || [];
+        return ok(cors, { deals });
+      }
+
+      case "getAllDeals": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        let all = [];
+        for (const co of companies) {
+          const deals = (await getJSON("deals-" + co.id)) || [];
+          all = all.concat(deals);
+        }
+        return ok(cors, { deals: all });
+      }
+
+      case "setDeals": {
+        requireCompanyAccess(session, p.companyId);
+        await setJSON("deals-" + p.companyId, p.deals || []);
+        return ok(cors, { done: true });
+      }
+
+      case "submitDeal": {
+        // partner-rep or partner-review submitting a new lead for their own company
+        if (!session || session.role === "admin") { const e = new Error("Unauthorized"); e.status = 401; throw e; }
+        const deals = (await getJSON("deals-" + session.companyId)) || [];
+        deals.push(p.deal);
+        await setJSON("deals-" + session.companyId, deals);
+        return ok(cors, { done: true });
+      }
+
+      case "getNotifications": {
+        if (p.scope === "admin") requireAdmin(session);
+        else requireCompanyAccess(session, p.scope);
+        const notifs = (await getJSON("notif-" + p.scope)) || [];
+        return ok(cors, { notifications: notifs });
+      }
+
+      case "setNotifications": {
+        if (p.scope === "admin") requireAdmin(session);
+        else requireCompanyAccess(session, p.scope);
+        await setJSON("notif-" + p.scope, p.notifications || []);
+        return ok(cors, { done: true });
+      }
+
+      case "pushNotification": {
+        // internal use — any authenticated session may notify admin or their own company
+        if (!session) { const e = new Error("Unauthorized"); e.status = 401; throw e; }
+        const scope = p.scope;
+        if (scope !== "admin") requireCompanyAccess(session, scope);
+        const notifs = (await getJSON("notif-" + scope)) || [];
+        notifs.unshift({ id: "ntf_" + crypto.randomBytes(4).toString("hex"), message: p.message, createdAt: new Date().toISOString(), read: false });
+        await setJSON("notif-" + scope, notifs.slice(0, 60));
+        return ok(cors, { done: true });
+      }
+
+      case "getMessages": {
+        requireCompanyAccess(session, p.companyId);
+        const msgs = (await getJSON("msgs-" + p.companyId)) || [];
+        return ok(cors, { messages: msgs });
+      }
+
+      case "getAllMessages": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const byCompany = {};
+        for (const co of companies) byCompany[co.id] = (await getJSON("msgs-" + co.id)) || [];
+        return ok(cors, { messagesByCompany: byCompany });
+      }
+
+      case "getGridStatus": {
+        if (!session) { const e = new Error("Unauthorized"); e.status = 401; throw e; }
+        const data = await fetchGridStatus();
+        return ok(cors, data);
+      }
+
+      case "sendMessage": {
+        requireCompanyAccess(session, p.companyId);
+        const isAdmin = session.role === "admin";
+        const msgs = (await getJSON("msgs-" + p.companyId)) || [];
+        msgs.push({
+          id: "msg_" + crypto.randomBytes(4).toString("hex"),
+          from: isAdmin ? "admin" : "partner",
+          text: p.text, authorName: session.personName || (isAdmin ? "UNERGY" : session.companyName),
+          dealId: p.dealId || null, dealLabel: p.dealLabel || null,
+          createdAt: new Date().toISOString(),
+          readByAdmin: isAdmin, readByPartner: !isAdmin,
+        });
+        await setJSON("msgs-" + p.companyId, msgs);
+        return ok(cors, { done: true });
+      }
+
+      default:
+        return { statusCode: 404, headers: cors, body: "Unknown action" };
+    }
+  } catch (err) {
+    return { statusCode: err.status || 500, headers: cors, body: JSON.stringify({ error: err.message || "Server error" }) };
+  }
+};
+
+function ok(cors, data) {
+  return { statusCode: 200, headers: { ...cors, "Content-Type": "application/json" }, body: JSON.stringify(data) };
+}
