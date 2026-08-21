@@ -92,37 +92,68 @@ async function fetchGridStatus() {
   const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const timeParams = { start_time: start.toISOString(), end_time: now.toISOString() };
 
-  let price = null, priceLabel = null, series = [];
+  let price = null, priceLabel = null, priceSeries = [];
   try {
     const rows = await gridstatusQuery("ercot_spp_day_ahead_hourly", apiKey, { ...timeParams, limit: 300 });
     if (rows.length) {
       const cols = pickColumns(rows[0]);
       if (cols.valueKeys.length) {
         const valKey = cols.valueKeys[0];
-        series = rows.map((r) => parseFloat(r[valKey])).filter((v) => !isNaN(v));
-        price = series.length ? series[series.length - 1] : null;
+        priceSeries = rows.map((r) => parseFloat(r[valKey])).filter((v) => !isNaN(v));
+        price = priceSeries.length ? priceSeries[priceSeries.length - 1] : null;
         priceLabel = niceLabel(valKey);
       }
     }
-  } catch (e) { /* price section stays empty if this fails */ }
+  } catch (e) { /* price stays empty if this fails */ }
 
-  let fuelMix = null;
+  let load = null;
   try {
-    const rows = await gridstatusQuery("ercot_fuel_mix", apiKey, { ...timeParams, limit: 50 });
+    const rows = await gridstatusQuery("ercot_load", apiKey, { ...timeParams, limit: 300 });
     if (rows.length) {
-      const latest = rows[rows.length - 1];
-      const cols = pickColumns(latest);
-      const mix = {};
-      cols.valueKeys.forEach((k) => {
-        const v = parseFloat(latest[k]);
-        if (!isNaN(v) && v > 0) mix[k] = v;
+      const cols = pickColumns(rows[rows.length - 1]);
+      if (cols.valueKeys.length) {
+        const v = parseFloat(rows[rows.length - 1][cols.valueKeys[0]]);
+        if (!isNaN(v)) load = v;
+      }
+    }
+  } catch (e) { /* load stays empty if this fails */ }
+
+  let fuelSeries = [], fuelKeys = [], latestMix = null, mainSource = null;
+  try {
+    const rows = await gridstatusQuery("ercot_fuel_mix", apiKey, { ...timeParams, limit: 200 });
+    if (rows.length) {
+      const keySet = {};
+      fuelSeries = rows.map((r) => {
+        const cols = pickColumns(r);
+        const mix = {};
+        cols.valueKeys.forEach((k) => {
+          const v = parseFloat(r[k]);
+          if (!isNaN(v)) { mix[k] = v; keySet[k] = true; }
+        });
+        return mix;
       });
-      if (Object.keys(mix).length) fuelMix = mix;
+      fuelKeys = Object.keys(keySet);
+      latestMix = fuelSeries.length ? fuelSeries[fuelSeries.length - 1] : null;
+      if (latestMix) {
+        let best = null, bestVal = -1;
+        Object.keys(latestMix).forEach((k) => { if (latestMix[k] > bestVal) { bestVal = latestMix[k]; best = k; } });
+        mainSource = best ? niceLabel(best) : null;
+      }
     }
   } catch (e) { /* fuel mix is best-effort */ }
 
-  if (price === null && !fuelMix) return { available: false, reason: "fetch_failed" };
-  return { available: true, price, priceLabel, series, fuelMix, fetchedAt: new Date().toISOString() };
+  let netLoad = null;
+  if (load !== null && latestMix) {
+    const wind = latestMix["wind"] || 0;
+    const solar = latestMix["solar"] || 0;
+    netLoad = load - wind - solar;
+  }
+
+  if (price === null && !latestMix && load === null) return { available: false, reason: "fetch_failed" };
+  return {
+    available: true, price, priceLabel, priceSeries, load, netLoad, mainSource,
+    fuelSeries, fuelKeys, fetchedAt: new Date().toISOString(),
+  };
 }
 
 // ---------- session tokens (signed, stateless — no server-side session storage needed) ----------
