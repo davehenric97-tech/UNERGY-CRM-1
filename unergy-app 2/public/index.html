@@ -155,6 +155,11 @@ a.linklike{color:var(--teal);cursor:pointer;text-decoration:underline;font-size:
 .grid-swatch{width:9px;height:9px;border-radius:2px;display:inline-block;}
 .grid-widget-foot{font-size:10.5px;color:var(--textdim);margin-top:10px;}
 .grid-widget-foot a{color:var(--teal);}
+.grid-stats-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;}
+.grid-stat-card{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 18px;flex:1;min-width:130px;}
+.grid-stat-value{font-size:22px;font-weight:700;}
+.grid-stat-label{font-size:10.5px;color:var(--textdim);text-transform:uppercase;letter-spacing:.5px;margin-top:2px;}
+.grid-section-title{font-size:11px;font-weight:700;color:var(--textdim);text-transform:uppercase;letter-spacing:.5px;margin:16px 0 6px;}
 tr.row-green{background:rgba(47,174,102,.10);}
 tr.row-green:hover{background:rgba(47,174,102,.17);}
 tr.row-red{background:rgba(217,68,43,.09);}
@@ -492,7 +497,7 @@ var FUEL_COLORS = {
 function gridNiceLabel(key){
   return String(key).replace(/_/g," ").replace(/\b\w/g, function(c){ return c.toUpperCase(); });
 }
-var APP_GRID = { status:"idle", price:null, priceLabel:null, series:[], fuelMix:null, fetchedAt:null };
+var APP_GRID = { status:"idle", price:null, priceLabel:null, priceSeries:[], load:null, netLoad:null, mainSource:null, fuelSeries:[], fuelKeys:[], fetchedAt:null };
 function fetchGridData(){
   APP_GRID.status = "loading";
   apiCall("getGridStatus", {}).then(function(res){
@@ -500,8 +505,12 @@ function fetchGridData(){
     APP_GRID.status = "ok";
     APP_GRID.price = res.price;
     APP_GRID.priceLabel = res.priceLabel;
-    APP_GRID.series = res.series || [];
-    APP_GRID.fuelMix = res.fuelMix;
+    APP_GRID.priceSeries = res.priceSeries || [];
+    APP_GRID.load = res.load;
+    APP_GRID.netLoad = res.netLoad;
+    APP_GRID.mainSource = res.mainSource;
+    APP_GRID.fuelSeries = res.fuelSeries || [];
+    APP_GRID.fuelKeys = res.fuelKeys || [];
     APP_GRID.fetchedAt = res.fetchedAt;
     renderApp();
   }).catch(function(){ APP_GRID.status = "error"; renderApp(); });
@@ -518,7 +527,7 @@ function sparklineSvg(series){
   if(!series || series.length < 2) return "";
   var min = Math.min.apply(null, series), max = Math.max.apply(null, series);
   var range = (max - min) || 1;
-  var w = 240, h = 44;
+  var w = 700, h = 90;
   var pts = series.map(function(v, i){
     var x = (i / (series.length - 1)) * w;
     var y = h - ((v - min) / range) * h;
@@ -526,6 +535,36 @@ function sparklineSvg(series){
   }).join(" ");
   return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+h+'" preserveAspectRatio="none">' +
     '<polyline points="'+pts+'" fill="none" stroke="var(--teal)" stroke-width="2"/></svg>';
+}
+function stackedAreaSvg(series, keys){
+  if(!series || !series.length || !keys || !keys.length) return "";
+  var w = 700, h = 200;
+  var n = series.length;
+  var maxTotal = 0;
+  var cumulativeRows = series.map(function(row){
+    var cum = {}, running = 0;
+    keys.forEach(function(k){ running += (row[k] || 0); cum[k] = running; });
+    if(running > maxTotal) maxTotal = running;
+    return cum;
+  });
+  if(maxTotal <= 0) return "";
+  function x(i){ return n > 1 ? (i / (n - 1)) * w : 0; }
+  function y(v){ return h - (v / maxTotal) * h; }
+  var shapes = "";
+  keys.forEach(function(k, idx){
+    var topPts = cumulativeRows.map(function(cum, i){ return x(i).toFixed(1) + "," + y(cum[k]).toFixed(1); });
+    var bottomPts;
+    if(idx === 0){
+      bottomPts = cumulativeRows.map(function(cum, i){ return x(i).toFixed(1) + "," + y(0).toFixed(1); }).reverse();
+    } else {
+      var prevK = keys[idx - 1];
+      bottomPts = cumulativeRows.map(function(cum, i){ return x(i).toFixed(1) + "," + y(cum[prevK]).toFixed(1); }).reverse();
+    }
+    var pts = topPts.concat(bottomPts).join(" ");
+    var color = FUEL_COLORS[k.toLowerCase()] || "#93A2BA";
+    shapes += '<polygon points="'+pts+'" fill="'+color+'" opacity="0.92"></polygon>';
+  });
+  return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="200" preserveAspectRatio="none">' + shapes + '</svg>';
 }
 function buildGridWidget(){
   var g = APP_GRID;
@@ -538,34 +577,36 @@ function buildGridWidget(){
       '<div class="grid-widget-foot">View it directly: <a href="https://www.gridstatus.io/live/ercot" target="_blank" rel="noopener">gridstatus.io/live/ercot</a></div>' +
       '</div>';
   }
-  var fuelHtml = "";
-  if(g.fuelMix){
-    var total = 0;
-    Object.keys(g.fuelMix).forEach(function(k){ total += g.fuelMix[k]; });
-    if(total > 0){
-      var bars = "", legend = "";
-      Object.keys(g.fuelMix).sort(function(a,b){ return g.fuelMix[b]-g.fuelMix[a]; }).forEach(function(k){
-        var pct = (g.fuelMix[k] / total) * 100;
-        if(pct < 0.5) return;
-        var color = FUEL_COLORS[k.toLowerCase()] || "#93A2BA";
-        var label = gridNiceLabel(k);
-        bars += '<div style="width:'+pct.toFixed(1)+'%;background:'+color+';" title="'+esc(label)+': '+pct.toFixed(1)+'%"></div>';
-        legend += '<span><span class="grid-swatch" style="background:'+color+';"></span>'+esc(label)+' '+pct.toFixed(0)+'%</span>';
-      });
-      fuelHtml = '<div style="flex:1;min-width:220px;"><div class="grid-prc-label">Live fuel mix</div>' +
-        '<div class="grid-fuelmix-bar">'+bars+'</div><div class="grid-fuelmix-legend">'+legend+'</div></div>';
-    }
+  function statCard(label, value){
+    return '<div class="grid-stat-card"><div class="grid-stat-value">'+esc(value)+'</div><div class="grid-stat-label">'+esc(label)+'</div></div>';
   }
+  var stats = "";
+  stats += statCard("Load", g.load != null ? Math.round(g.load).toLocaleString() + " MW" : "\u2014");
+  if(g.netLoad != null) stats += statCard("Net Load", Math.round(g.netLoad).toLocaleString() + " MW");
+  stats += statCard("Price", g.price != null ? "$" + g.price.toFixed(2) + "/MWh" : "\u2014");
+  stats += statCard("Main Source", g.mainSource || "\u2014");
+
+  var priceChart = "";
+  if(g.priceSeries && g.priceSeries.length > 1){
+    priceChart = '<div class="grid-section-title">Price \u2014 last 24h</div>' + sparklineSvg(g.priceSeries);
+  }
+
+  var fuelChart = "", legend = "";
+  if(g.fuelSeries.length && g.fuelKeys.length){
+    fuelChart = '<div class="grid-section-title">Fuel Mix \u2014 last 24h</div>' + stackedAreaSvg(g.fuelSeries, g.fuelKeys);
+    legend = '<div class="grid-fuelmix-legend">' + g.fuelKeys.map(function(k){
+      var color = FUEL_COLORS[k.toLowerCase()] || "#93A2BA";
+      return '<span><span class="grid-swatch" style="background:'+color+';"></span>'+esc(gridNiceLabel(k))+'</span>';
+    }).join("") + '</div>';
+  }
+
   var fetchedLabel = g.fetchedAt ? new Date(g.fetchedAt).toLocaleTimeString() : "";
   return '<div class="grid-widget">' +
     '<div class="grid-widget-top"><div class="grid-widget-title">Texas Grid Status (gridstatus.io, live)</div></div>' +
-    '<div class="grid-widget-body">' +
-      '<div><div class="grid-prc-value">'+(g.price!=null ? "$"+g.price.toFixed(2) : "\u2014")+'</div><div class="grid-prc-label">'+esc(g.priceLabel || "Day-ahead settlement price")+'</div></div>' +
-      '<div class="grid-sparkline">'+sparklineSvg(g.series)+'<div class="grid-prc-label">Last 24h trend</div></div>' +
-      fuelHtml +
-    '</div>' +
+    '<div class="grid-stats-row">' + stats + '</div>' +
+    priceChart + fuelChart + legend +
     '<div class="grid-widget-foot">Source: gridstatus.io API' + (fetchedLabel ? (" \u00b7 fetched " + esc(fetchedLabel)) : "") +
-    '. Full detail at <a href="https://www.gridstatus.io/live/ercot" target="_blank" rel="noopener">gridstatus.io/live/ercot</a>.</div>' +
+    '. Locational pricing, block-price tables, and live news insights aren\'t built in yet \u2014 full detail at <a href="https://www.gridstatus.io/live/ercot" target="_blank" rel="noopener">gridstatus.io/live/ercot</a>.</div>' +
     '</div>';
 }
 
