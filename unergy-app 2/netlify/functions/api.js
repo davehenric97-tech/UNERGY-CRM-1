@@ -545,4 +545,3 @@ exports.handler = async (event) => {
 function ok(cors, data) {
   return { statusCode: 200, headers: { ...cors, "Content-Type": "application/json" }, body: JSON.stringify(data) };
 }
-}
