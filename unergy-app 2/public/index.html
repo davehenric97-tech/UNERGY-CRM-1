@@ -536,6 +536,66 @@ function startGridRefresh(){
 function stopGridRefresh(){
   if(gridRefreshTimer){ clearInterval(gridRefreshTimer); gridRefreshTimer = null; }
 }
+
+/* ============ live updates (notifications + messages, no re-login needed) ============ */
+var liveUpdateTimer = null;
+function refreshOpenMessageThreadDom(companyId){
+  var list = document.getElementById("msg-thread-list");
+  if(!list) return; // that thread isn't the one currently open on screen
+  var isAdmin = APP.session.role === "admin";
+  var thread = APP.messagesByCompany[companyId] || [];
+  var bubbles = thread.length === 0 ?
+    '<div class="empty" style="padding:20px 10px;"><div class="big">No messages yet</div></div>' :
+    thread.map(function(m){
+      var mine = isAdmin ? m.from === "admin" : m.from === "partner";
+      var whoTag = m.dealLabel ? '<span class="msg-client-tag">Re: '+esc(m.dealLabel)+'</span>' : "";
+      return '<div class="msg-bubble '+(mine?"mine":"theirs")+'">' + whoTag + esc(m.text) +
+        '<div class="msg-meta">'+(m.authorName?esc(m.authorName)+" · ":"")+fmtTime(m.createdAt)+'</div></div>';
+    }).join("");
+  // Only the bubble list is replaced — the textarea and "Regarding" dropdown
+  // are untouched, so anything the user is mid-typing is never lost.
+  list.innerHTML = bubbles;
+  list.scrollTop = list.scrollHeight;
+}
+function pollLiveUpdates(){
+  if(!APP.session) return;
+  var calls = [];
+  var scope = notifScopeForSession();
+  if(scope){
+    calls.push(apiCall("getNotifications", {scope: scope}).then(function(res){
+      APP.notifications = res.notifications || [];
+    }).catch(function(){}));
+  }
+  if(APP.session.role === "admin"){
+    calls.push(apiCall("getAllMessages", {}).then(function(res){
+      APP.messagesByCompany = res.messagesByCompany || {};
+      if(APP.activeMsgCompany){
+        markThreadRead(APP.activeMsgCompany);
+        refreshOpenMessageThreadDom(APP.activeMsgCompany);
+      }
+    }).catch(function(){}));
+  } else if(APP.session.mode === "review"){
+    var cid = APP.session.companyId;
+    calls.push(apiCall("getMessages", {companyId: cid}).then(function(res){
+      APP.messagesByCompany[cid] = res.messages || [];
+      if(APP.activeMsgCompany === cid){
+        markThreadRead(cid);
+        refreshOpenMessageThreadDom(cid);
+      }
+    }).catch(function(){}));
+  }
+  if(!calls.length) return;
+  Promise.all(calls).then(function(){ renderApp(); });
+}
+function startLiveUpdatePolling(){
+  if(liveUpdateTimer) clearInterval(liveUpdateTimer);
+  // Every 15 seconds — frequent enough that messages and updates feel live
+  // without needing to sign out and back in, but light on the backend.
+  liveUpdateTimer = setInterval(pollLiveUpdates, 15000);
+}
+function stopLiveUpdatePolling(){
+  if(liveUpdateTimer){ clearInterval(liveUpdateTimer); liveUpdateTimer = null; }
+}
 function sparklineSvg(series){
   if(!series || series.length < 2) return "";
   var min = Math.min.apply(null, series), max = Math.max.apply(null, series);
@@ -1434,6 +1494,32 @@ function resetAdminMemberPassword(memberId){
 /* ============ LOGIN ACTIONS ============ */
 // First-run defaults (email/password) are created automatically, server-side,
 // the first time anyone tries to log in against an empty database.
+var SESSION_STORAGE_KEY = "unergy_session_v1";
+function saveSession(){
+  try{ localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({token: APP.authToken, session: APP.session})); } catch(e){}
+}
+function loadSavedSession(){
+  try{
+    var raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch(e){ return null; }
+}
+function clearSavedSession(){
+  try{ localStorage.removeItem(SESSION_STORAGE_KEY); } catch(e){}
+}
+function loadPartnerReviewData(){
+  var cid = APP.session.companyId;
+  return Promise.all([apiCall("getDeals", {companyId: cid}), apiCall("getNotifications", {scope: cid}), apiCall("getMessages", {companyId: cid})])
+    .then(function(res2){
+      APP.deals = res2[0].deals || [];
+      APP.notifications = res2[1].notifications || [];
+      APP.messagesByCompany = {};
+      APP.messagesByCompany[cid] = res2[2].messages || [];
+      renderApp();
+      startGridRefresh();
+      startLiveUpdatePolling();
+    });
+}
 function attemptSubmitCode(code){
   code = (code || "").trim();
   if(!code){ APP.loginErr = "Enter your access code."; renderApp(); return; }
@@ -1442,6 +1528,7 @@ function attemptSubmitCode(code){
     APP.session = {role:"partner", mode:"rep", companyId: res.session.companyId, companyName: res.session.companyName, actorName:null, actorEmail:null};
     APP.deals = [];
     APP.notifications = [];
+    saveSession();
     renderApp();
   }).catch(function(err){ APP.loginErr = err.message; renderApp(); });
 }
@@ -1453,20 +1540,14 @@ function attemptLogin(email, password){
     var s = res.session;
     if(s.role === "admin"){
       APP.session = {role:"admin", actorName: s.personName, actorEmail: s.personEmail};
+      saveSession();
       finishAdminLogin();
     } else {
       APP.session = {role:"partner", mode:"review", companyId: s.companyId, companyName: s.companyName,
         actorName: s.personName, actorEmail: s.personEmail};
       APP.partnerTab = "review";
-      Promise.all([apiCall("getDeals", {companyId: s.companyId}), apiCall("getNotifications", {scope: s.companyId}), apiCall("getMessages", {companyId: s.companyId})])
-        .then(function(res2){
-          APP.deals = res2[0].deals || [];
-          APP.notifications = res2[1].notifications || [];
-          APP.messagesByCompany = {};
-          APP.messagesByCompany[s.companyId] = res2[2].messages || [];
-          renderApp();
-          startGridRefresh();
-        });
+      saveSession();
+      loadPartnerReviewData();
     }
   }).catch(function(err){ APP.loginErr = err.message; renderApp(); });
 }
@@ -1481,6 +1562,12 @@ function finishAdminLogin(){
       APP.adminTeam = res[4].team || [];
       renderApp();
       startGridRefresh();
+      startLiveUpdatePolling();
+    }).catch(function(){
+      // Saved token no longer works (e.g. it's stale) — fall back to a clean login screen.
+      clearSavedSession();
+      APP.session = null; APP.authToken = null;
+      renderApp();
     });
 }
 
@@ -1491,7 +1578,7 @@ document.addEventListener("click", function(e){
   var action = t.getAttribute("data-action");
   var id = t.getAttribute("data-id");
 
-  if(action === "logout"){ stopGridRefresh(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatus="all"; renderApp(); }
+  if(action === "logout"){ stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatus="all"; renderApp(); }
   else if(action === "show-admin"){ APP.showAdminField = true; APP.loginErr=""; renderApp(); }
   else if(action === "hide-admin"){ APP.showAdminField = false; APP.loginErr=""; renderApp(); }
   else if(action === "flow-access"){ APP.loginFlow = "access"; APP.loginErr=""; renderApp(); }
@@ -1583,9 +1670,38 @@ document.addEventListener("change", function(e){
   }
 });
 
-/* ============ INIT — nothing is fetched until a login action fires ============ */
+/* ============ INIT — restore a saved session if there is one, so a page ============ */
+/* refresh doesn't force a fresh login; otherwise nothing is fetched until   */
+/* a login action fires.                                                    */
 APP.filterCo = "all"; APP.filterStatus = "all";
-renderApp();
+(function tryRestoreSession(){
+  var saved = loadSavedSession();
+  if(!saved || !saved.token || !saved.session){ renderApp(); return; }
+  APP.authToken = saved.token;
+  var s = saved.session;
+  if(s.role === "admin"){
+    APP.session = {role:"admin", actorName: s.actorName, actorEmail: s.actorEmail};
+    renderApp();
+    finishAdminLogin();
+  } else if(s.role === "partner" && s.mode === "review"){
+    APP.session = s;
+    APP.partnerTab = "review";
+    renderApp();
+    loadPartnerReviewData().catch(function(){
+      clearSavedSession();
+      APP.session = null; APP.authToken = null;
+      renderApp();
+    });
+  } else if(s.role === "partner" && s.mode === "rep"){
+    APP.session = s;
+    APP.deals = [];
+    APP.notifications = [];
+    renderApp();
+  } else {
+    clearSavedSession();
+    renderApp();
+  }
+})();
 
 })();
 </script>
