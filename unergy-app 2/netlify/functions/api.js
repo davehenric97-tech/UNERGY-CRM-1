@@ -93,14 +93,10 @@ async function fetchGridStatus() {
   const timeParams = { start_time: start.toISOString(), end_time: now.toISOString() };
 
   let price = null, priceLabel = null, priceSeries = [];
-  let debug = {};
   try {
     const rows = await gridstatusQuery("ercot_spp_day_ahead_hourly", apiKey, { ...timeParams, limit: 300 });
-    debug.priceRowCount = rows.length;
-    debug.priceSampleRow = rows[0] || null;
     if (rows.length) {
       const cols = pickColumns(rows[0]);
-      debug.priceValueKeys = cols.valueKeys;
       if (cols.valueKeys.length) {
         const valKey = cols.valueKeys[0];
         priceSeries = rows.map((r) => parseFloat(r[valKey])).filter((v) => !isNaN(v));
@@ -108,28 +104,23 @@ async function fetchGridStatus() {
         priceLabel = niceLabel(valKey);
       }
     }
-  } catch (e) { debug.priceError = e.message; }
+  } catch (e) { /* price stays empty if this fails (e.g. rate limited) */ }
 
   let load = null;
   try {
     const rows = await gridstatusQuery("ercot_load", apiKey, { ...timeParams, limit: 300 });
-    debug.loadRowCount = rows.length;
-    debug.loadSampleRow = rows[rows.length - 1] || null;
     if (rows.length) {
       const cols = pickColumns(rows[rows.length - 1]);
-      debug.loadValueKeys = cols.valueKeys;
       if (cols.valueKeys.length) {
         const v = parseFloat(rows[rows.length - 1][cols.valueKeys[0]]);
         if (!isNaN(v)) load = v;
       }
     }
-  } catch (e) { debug.loadError = e.message; }
+  } catch (e) { /* load stays empty if this fails (e.g. rate limited) */ }
 
   let fuelSeries = [], fuelKeys = [], latestMix = null, mainSource = null;
   try {
     const rows = await gridstatusQuery("ercot_fuel_mix", apiKey, { ...timeParams, limit: 200 });
-    debug.fuelRowCount = rows.length;
-    debug.fuelSampleRow = rows[rows.length - 1] || null;
     if (rows.length) {
       const keySet = {};
       fuelSeries = rows.map((r) => {
@@ -149,7 +140,7 @@ async function fetchGridStatus() {
         mainSource = best ? niceLabel(best) : null;
       }
     }
-  } catch (e) { debug.fuelError = e.message; }
+  } catch (e) { /* fuel mix is best-effort (e.g. rate limited) */ }
 
   let netLoad = null;
   if (load !== null && latestMix) {
@@ -158,10 +149,10 @@ async function fetchGridStatus() {
     netLoad = load - wind - solar;
   }
 
-  if (price === null && !latestMix && load === null) return { available: false, reason: "fetch_failed", debug };
+  if (price === null && !latestMix && load === null) return { available: false, reason: "fetch_failed" };
   return {
     available: true, price, priceLabel, priceSeries, load, netLoad, mainSource,
-    fuelSeries, fuelKeys, fetchedAt: new Date().toISOString(), debug,
+    fuelSeries, fuelKeys, fetchedAt: new Date().toISOString(),
   };
 }
 
