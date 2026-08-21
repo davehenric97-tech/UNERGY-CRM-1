@@ -497,29 +497,41 @@ var FUEL_COLORS = {
 function gridNiceLabel(key){
   return String(key).replace(/_/g," ").replace(/\b\w/g, function(c){ return c.toUpperCase(); });
 }
-var APP_GRID = { status:"idle", price:null, priceLabel:null, priceSeries:[], load:null, netLoad:null, mainSource:null, fuelSeries:[], fuelKeys:[], fetchedAt:null, debug:null };
+var APP_GRID = { status:"idle", price:null, priceLabel:null, priceSeries:[], load:null, netLoad:null, mainSource:null, fuelSeries:[], fuelKeys:[], fetchedAt:null };
 function fetchGridData(){
-  APP_GRID.status = "loading";
+  if(APP_GRID.status === "idle") APP_GRID.status = "loading";
   apiCall("getGridStatus", {}).then(function(res){
-    if(!res.available){ APP_GRID.status = "error"; renderApp(); return; }
+    if(!res.available){
+      // Keep any previously-loaded data on screen — a single failed refresh
+      // (e.g. a temporary rate limit) shouldn't blank out good numbers.
+      if(APP_GRID.status === "loading") APP_GRID.status = "error";
+      renderApp();
+      return;
+    }
     APP_GRID.status = "ok";
-    APP_GRID.price = res.price;
-    APP_GRID.priceLabel = res.priceLabel;
-    APP_GRID.priceSeries = res.priceSeries || [];
-    APP_GRID.load = res.load;
-    APP_GRID.netLoad = res.netLoad;
-    APP_GRID.mainSource = res.mainSource;
-    APP_GRID.fuelSeries = res.fuelSeries || [];
-    APP_GRID.fuelKeys = res.fuelKeys || [];
+    // Only overwrite a field when this fetch actually returned something for
+    // it — a partial failure on one dataset shouldn't wipe out the others.
+    if(res.price != null) APP_GRID.price = res.price;
+    if(res.priceLabel) APP_GRID.priceLabel = res.priceLabel;
+    if(res.priceSeries && res.priceSeries.length) APP_GRID.priceSeries = res.priceSeries;
+    if(res.load != null) APP_GRID.load = res.load;
+    if(res.netLoad != null) APP_GRID.netLoad = res.netLoad;
+    if(res.mainSource) APP_GRID.mainSource = res.mainSource;
+    if(res.fuelSeries && res.fuelSeries.length) APP_GRID.fuelSeries = res.fuelSeries;
+    if(res.fuelKeys && res.fuelKeys.length) APP_GRID.fuelKeys = res.fuelKeys;
     APP_GRID.fetchedAt = res.fetchedAt;
-    APP_GRID.debug = res.debug;
     renderApp();
-  }).catch(function(){ APP_GRID.status = "error"; renderApp(); });
+  }).catch(function(){
+    if(APP_GRID.status === "loading") APP_GRID.status = "error";
+    renderApp();
+  });
 }
 function startGridRefresh(){
   fetchGridData();
   if(gridRefreshTimer) clearInterval(gridRefreshTimer);
-  gridRefreshTimer = setInterval(fetchGridData, 60000);
+  // Every 5 minutes — this data doesn't change fast enough to need more,
+  // and polling less often keeps us well clear of gridstatus.io's rate limit.
+  gridRefreshTimer = setInterval(fetchGridData, 300000);
 }
 function stopGridRefresh(){
   if(gridRefreshTimer){ clearInterval(gridRefreshTimer); gridRefreshTimer = null; }
@@ -602,17 +614,12 @@ function buildGridWidget(){
   }
 
   var fetchedLabel = g.fetchedAt ? new Date(g.fetchedAt).toLocaleTimeString() : "";
-  var debugBlock = "";
-  if(g.debug){
-    debugBlock = '<pre style="margin-top:10px;padding:10px;background:#0d1512;color:#8fdca0;font-size:10.5px;border-radius:6px;overflow-x:auto;white-space:pre-wrap;">DEBUG (temporary): '+esc(JSON.stringify(g.debug, null, 2))+'</pre>';
-  }
   return '<div class="grid-widget">' +
     '<div class="grid-widget-top"><div class="grid-widget-title">Texas Grid Status (gridstatus.io, live)</div></div>' +
     '<div class="grid-stats-row">' + stats + '</div>' +
     priceChart + fuelChart + legend +
     '<div class="grid-widget-foot">Source: gridstatus.io API' + (fetchedLabel ? (" \u00b7 fetched " + esc(fetchedLabel)) : "") +
     '. Locational pricing, block-price tables, and live news insights aren\'t built in yet \u2014 full detail at <a href="https://www.gridstatus.io/live/ercot" target="_blank" rel="noopener">gridstatus.io/live/ercot</a>.</div>' +
-    debugBlock +
     '</div>';
 }
 
