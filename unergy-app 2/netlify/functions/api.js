@@ -62,6 +62,70 @@ async function genUniqueSubmitCode() {
 }
 function normEmail(e) { return (e || "").trim().toLowerCase(); }
 
+// ---------- Notion import (server-side fetch — the integration token never reaches the browser) ----------
+function extractNotionValue(prop) {
+  if (!prop) return "";
+  switch (prop.type) {
+    case "title": return (prop.title || []).map((t) => t.plain_text).join("");
+    case "rich_text": return (prop.rich_text || []).map((t) => t.plain_text).join("");
+    case "email": return prop.email || "";
+    case "phone_number": return prop.phone_number || "";
+    case "number": return prop.number != null ? String(prop.number) : "";
+    case "select": return prop.select ? prop.select.name : "";
+    case "status": return prop.status ? prop.status.name : "";
+    case "multi_select": return (prop.multi_select || []).map((o) => o.name).join(", ");
+    case "date": return prop.date ? (prop.date.start || "") : "";
+    case "checkbox": return prop.checkbox ? "Yes" : "No";
+    case "url": return prop.url || "";
+    case "people": return (prop.people || []).map((pp) => pp.name || "").join(", ");
+    case "formula": return extractNotionValue({ type: prop.formula.type, [prop.formula.type]: prop.formula[prop.formula.type] });
+    case "rollup": {
+      if (prop.rollup.type === "array") return (prop.rollup.array || []).map((v) => extractNotionValue(v)).filter(Boolean).join(", ");
+      const rv = prop.rollup[prop.rollup.type];
+      return rv != null ? String(rv) : "";
+    }
+    default: return "";
+  }
+}
+async function fetchNotionDatabase(databaseId, apiKey) {
+  const headersSet = {};
+  const allRows = [];
+  let cursor = undefined;
+  let hasMore = true;
+  let guard = 0;
+  while (hasMore && guard < 20) {
+    guard++;
+    const body = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+    const res = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + apiKey,
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const suffix = res.status === 404 ? " — check the database was shared with your integration" : "";
+      throw new Error("Notion returned " + res.status + suffix);
+    }
+    const json = await res.json();
+    (json.results || []).forEach((page) => {
+      const row = {};
+      const props = page.properties || {};
+      Object.keys(props).forEach((key) => {
+        headersSet[key] = true;
+        row[key] = extractNotionValue(props[key]);
+      });
+      allRows.push(row);
+    });
+    hasMore = !!json.has_more;
+    cursor = json.next_cursor;
+  }
+  return { headers: Object.keys(headersSet), rows: allRows };
+}
+
 // ---------- grid status (server-side fetch to gridstatus.io — API key never reaches the browser) ----------
 function niceLabel(key) {
   return String(key).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -435,7 +499,10 @@ exports.handler = async (event) => {
       case "getDeals": {
         requireCompanyAccess(session, p.companyId);
         const deals = (await getJSON("deals-" + p.companyId)) || [];
-        return ok(cors, { deals });
+        // Partners never see accounts admin has marked hidden-from-partner —
+        // admin's own view (getAllDeals) always sees everything.
+        const visible = session.role === "admin" ? deals : deals.filter((d) => !d.hiddenFromPartner);
+        return ok(cors, { deals: visible });
       }
 
       case "getAllDeals": {
@@ -506,6 +573,15 @@ exports.handler = async (event) => {
       case "getGridStatus": {
         if (!session) { const e = new Error("Unauthorized"); e.status = 401; throw e; }
         const data = await fetchGridStatus();
+        return ok(cors, data);
+      }
+
+      case "notionFetch": {
+        requireAdmin(session);
+        const notionKey = process.env.NOTION_API_KEY;
+        if (!notionKey) { const e = new Error("Notion isn't connected yet — add a NOTION_API_KEY environment variable in Netlify."); e.status = 400; throw e; }
+        if (!p.databaseId) { const e = new Error("Missing database ID"); e.status = 400; throw e; }
+        const data = await fetchNotionDatabase(p.databaseId, notionKey);
         return ok(cors, data);
       }
 
