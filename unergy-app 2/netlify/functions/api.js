@@ -522,6 +522,26 @@ exports.handler = async (event) => {
         return ok(cors, { done: true });
       }
 
+      case "moveDeal": {
+        requireAdmin(session);
+        const { dealId, fromCompanyId, toCompanyId } = p;
+        if (!dealId || !fromCompanyId || !toCompanyId) { const e = new Error("Missing dealId, fromCompanyId, or toCompanyId"); e.status = 400; throw e; }
+        if (fromCompanyId === toCompanyId) { const e = new Error("That's already where this account is"); e.status = 400; throw e; }
+        const fromDeals = (await getJSON("deals-" + fromCompanyId)) || [];
+        const idx = fromDeals.findIndex((d) => d.id === dealId);
+        if (idx === -1) { const e = new Error("Account not found"); e.status = 404; throw e; }
+        const deal = fromDeals[idx];
+        deal.companyId = toCompanyId;
+        deal.updatedAt = new Date().toISOString();
+        deal.updatedBy = p.actorLabel || deal.updatedBy;
+        const remaining = fromDeals.filter((d) => d.id !== dealId);
+        await setJSON("deals-" + fromCompanyId, remaining);
+        const toDeals = (await getJSON("deals-" + toCompanyId)) || [];
+        toDeals.push(deal);
+        await setJSON("deals-" + toCompanyId, toDeals);
+        return ok(cors, { deal });
+      }
+
       case "submitDeal": {
         // partner-rep or partner-review submitting a new lead for their own company
         if (!session || session.role === "admin") { const e = new Error("Unauthorized"); e.status = 401; throw e; }
