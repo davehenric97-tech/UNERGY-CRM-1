@@ -1206,12 +1206,21 @@ function openEditDealModal(dealId){
     (companyName(deal.companyId) + " · added " + fmtDate(deal.createdAt) + " · " + (deal.source === "partner" || deal.source === "rep" ? "partner-submitted" : "added internally"));
   if(deal.updatedBy) sub += " · last updated by " + deal.updatedBy;
   else if(deal.createdBy) sub += " · added by " + deal.createdBy;
+  var otherCompanies = APP.companies.filter(function(c){ return c.id !== deal.companyId; });
+  var moveHtml = "";
+  if(!readOnly && otherCompanies.length){
+    var moveOpts = otherCompanies.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'; }).join("");
+    moveHtml = '<div style="margin-top:14px;"><label>Move to another partner</label>' +
+      '<div style="display:flex;gap:8px;"><select id="move-target-company" style="flex:1;">'+moveOpts+'</select>' +
+      '<button class="btn-ghost btn-small" data-action="move-deal" data-id="'+esc(deal.id)+'">Move</button></div></div>';
+  }
   var actionsHtml = readOnly ?
     ('<div class="actions"><button class="btn-ghost" data-action="close-modal" style="flex:none;width:100%;">Close</button></div>') :
     ('<label style="display:flex;align-items:center;gap:8px;margin-top:14px;">' +
        '<input type="checkbox" id="edit-hidden-from-partner"'+(deal.hiddenFromPartner?' checked':'')+'> ' +
        'Hidden from partner (they won\'t see this account at all — you still will)' +
      '</label>' +
+     moveHtml +
      '<div class="actions"><button class="btn-ghost" data-action="close-modal">Cancel</button>' +
      '<button class="btn-danger" data-action="delete-deal" data-id="'+esc(deal.id)+'">Delete permanently</button>' +
      '<button class="btn-primary" style="margin-top:0" data-action="save-edit-deal" data-id="'+esc(deal.id)+'">Save</button></div>');
@@ -1277,6 +1286,25 @@ function deleteDealPermanently(dealId){
     renderApp();
   }).catch(function(){
     alert("Couldn't delete that account — check your connection and try again.");
+  });
+}
+function moveDealToCompany(dealId){
+  var deal = APP.deals.filter(function(d){ return d.id === dealId; })[0];
+  if(!deal) return;
+  var selectEl = document.getElementById("move-target-company");
+  var toCompanyId = selectEl ? selectEl.value : "";
+  if(!toCompanyId || toCompanyId === deal.companyId) return;
+  var toCo = APP.companies.filter(function(c){ return c.id === toCompanyId; })[0];
+  var fromCo = APP.companies.filter(function(c){ return c.id === deal.companyId; })[0];
+  var ok1 = window.confirm('Move "'+(deal.customerName||"this account")+'" from '+(fromCo?fromCo.name:"its current partner")+' to '+(toCo?toCo.name:"the selected partner")+'? They\'ll be able to see it right away, and the old partner will no longer see it.');
+  if(!ok1) return;
+  apiCall("moveDeal", {dealId: dealId, fromCompanyId: deal.companyId, toCompanyId: toCompanyId, actorLabel: actorLabel()}).then(function(res){
+    APP.deals = APP.deals.map(function(d){ return d.id === dealId ? res.deal : d; });
+    closeModal();
+    renderApp();
+    pushNotification(toCompanyId, "UNERGY moved an account to you: "+(deal.customerName||"a client")+" — by "+actorLabel());
+  }).catch(function(err){
+    alert(err.message || "Couldn't move that account — check your connection and try again.");
   });
 }
 function openAddDealModal(){
@@ -1894,6 +1922,7 @@ document.addEventListener("click", function(e){
   else if(action === "close-modal"){ closeModal(); }
   else if(action === "save-edit-deal"){ saveEditDeal(id); }
   else if(action === "delete-deal"){ deleteDealPermanently(id); }
+  else if(action === "move-deal"){ moveDealToCompany(id); }
   else if(action === "save-add-deal"){ saveAddDeal(); }
   else if(action === "add-billing-entry"){ addBillingEntry(); }
   else if(action === "remove-billing-entry"){ removeBillingEntry(t.getAttribute("data-idx")); }
