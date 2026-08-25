@@ -43,6 +43,8 @@ button:active{transform:scale(.98);}
 .btn-primary{background:var(--amber);color:#FFFFFF;width:100%;margin-top:22px;}
 .btn-primary:hover{opacity:.9;}
 .btn-ghost{background:transparent;border:1px solid var(--line);color:var(--text);}
+.btn-danger{background:transparent;border:1px solid var(--red);color:var(--red);}
+.btn-danger:hover{background:var(--red);color:#fff;}
 .btn-ghost:hover{border-color:var(--textdim);}
 .btn-teal{background:var(--teal);color:#FFFFFF;}
 .btn-small{padding:6px 12px;font-size:12px;}
@@ -321,6 +323,251 @@ var PAYMENT_STATUS_OPTS = ["Current","30 Days Late","60 Days Late","90 Days Late
 var BATTERY_BRAND_OPTS = ["SolarEdge","Enphase","Tesla","Lion Energy","Duracell","Ecopro","Other"];
 var VPP_ENABLED_OPTS = ["No","Yes"];
 
+/* ============ CSV Import (admin only) ============ */
+var IMPORT_FIELDS = [
+  {key:"customerName", label:"Customer Name"},
+  {key:"businessName", label:"Business Name"},
+  {key:"email", label:"Email"},
+  {key:"phone", label:"Phone"},
+  {key:"serviceAddress", label:"Service Address"},
+  {key:"billingAddress", label:"Billing Address"},
+  {key:"esiid", label:"ESIID"},
+  {key:"solarBattery", label:"Solar/Battery"},
+  {key:"propertyType", label:"Property Type"},
+  {key:"ownsOrRents", label:"Owns/Rents"},
+  {key:"tdu", label:"TDU"},
+  {key:"currentREP", label:"Previous REP"},
+  {key:"contractTerm", label:"Contract Term (months)"},
+  {key:"priceKWH", label:"Price per kWh"},
+  {key:"salesRepName", label:"Sales Rep Name"},
+  {key:"intakeDate", label:"Intake Date"},
+  {key:"status", label:"Status"},
+  {key:"paymentStatus", label:"Payment Status"},
+  {key:"vppEnabled", label:"VPP Enabled"},
+  {key:"batteryBrand", label:"Battery Brand"},
+  {key:"notes", label:"Notes"}
+];
+function parseCSV(text){
+  var rows = [], row = [], field = "", inQuotes = false;
+  for(var i=0;i<text.length;i++){
+    var c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; } else inQuotes = false;
+      } else field += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ','){ row.push(field); field = ""; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row = []; field = ""; }
+      else if(c === '\r'){ /* ignore — \n handles the line break */ }
+      else field += c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  while(rows.length && rows[rows.length-1].length === 1 && rows[rows.length-1][0] === "") rows.pop();
+  if(!rows.length) return {headers: [], rows: []};
+  var headers = rows[0];
+  var dataRows = rows.slice(1).map(function(r){
+    var obj = {};
+    headers.forEach(function(h, idx){ obj[h] = r[idx] !== undefined ? r[idx] : ""; });
+    return obj;
+  });
+  return {headers: headers, rows: dataRows};
+}
+function guessFieldForHeader(header){
+  var h = header.toLowerCase().replace(/[^a-z0-9]/g, "");
+  var candidates = {
+    customerName: ["customername","name","customer","client","clientname"],
+    businessName: ["businessname","business","company"],
+    email: ["email","emailaddress"],
+    phone: ["phone","phonenumber","cell","mobile"],
+    serviceAddress: ["serviceaddress","address","propertyaddress"],
+    billingAddress: ["billingaddress"],
+    esiid: ["esiid","esi"],
+    solarBattery: ["solarbattery","solar","system","systemtype"],
+    propertyType: ["propertytype"],
+    ownsOrRents: ["ownsrents","ownrent","ownership"],
+    tdu: ["tdu","utility"],
+    currentREP: ["previousrep","currentrep","rep","provider"],
+    contractTerm: ["contractterm","term"],
+    priceKWH: ["pricekwh","price","rate","kwh"],
+    salesRepName: ["salesrep","salesrepname","agent","closer"],
+    intakeDate: ["intakedate","dateadded","created","signupdate"],
+    status: ["status","stage"],
+    paymentStatus: ["paymentstatus","payment"],
+    vppEnabled: ["vpp","vppenabled"],
+    batteryBrand: ["batterybrand","battery"],
+    notes: ["notes","comments","note"]
+  };
+  for(var key in candidates){ if(candidates[key].indexOf(h) > -1) return key; }
+  for(var key2 in candidates){
+    for(var j=0;j<candidates[key2].length;j++){ if(h.indexOf(candidates[key2][j]) > -1) return key2; }
+  }
+  return "";
+}
+function openImportModal(){
+  APP.importState = {step:1, source:"csv", companyId: APP.companies[0] ? APP.companies[0].id : "", headers:[], rows:[], mapping:{}};
+  renderImportModal();
+}
+function openNotionSyncModal(){
+  APP.importState = {step:1, source:"notion", companyId: APP.companies[0] ? APP.companies[0].id : "", headers:[], rows:[], mapping:{}};
+  renderImportModal();
+}
+function renderImportModal(){
+  var st = APP.importState;
+  if(!st) return;
+  var html;
+  if(st.step === 1){
+    var coOpts = APP.companies.map(function(c){
+      return '<option value="'+esc(c.id)+'"'+(st.companyId===c.id?" selected":"")+'>'+esc(c.name)+'</option>';
+    }).join("");
+    if(st.source === "notion"){
+      html = '<div class="modal-bg" id="import-modal-bg"><div class="modal">' +
+        '<button class="close" data-action="close-modal">×</button>' +
+        '<h3>Sync from Notion</h3>' +
+        '<p class="small">Paste the URL of the Notion database (or just its ID) — make sure it\'s been shared with your integration first.</p>' +
+        '<label>Import into</label><select id="import-company">'+coOpts+'</select>' +
+        '<label>Notion database URL or ID</label><input type="text" id="notion-db-id" placeholder="https://notion.so/yourworkspace/...">' +
+        '<div id="import-err"></div>' +
+        '<div class="actions"><button class="btn-primary" data-action="notion-fetch">Fetch from Notion</button></div>' +
+        '</div></div>';
+    } else {
+      html = '<div class="modal-bg" id="import-modal-bg"><div class="modal">' +
+        '<button class="close" data-action="close-modal">×</button>' +
+        '<h3>Import from CSV</h3>' +
+        '<p class="small">Export your Notion database as CSV (Notion: "···" menu → Export → CSV), then upload it here. You\'ll map each column on the next step.</p>' +
+        '<label>Import into</label><select id="import-company">'+coOpts+'</select>' +
+        '<label>CSV file</label><input type="file" id="import-file" accept=".csv">' +
+        '<div id="import-err"></div>' +
+        '<div class="actions"><button class="btn-primary" data-action="import-parse">Continue</button></div>' +
+        '</div></div>';
+    }
+  } else {
+    var fieldOpts = function(selected){
+      var out = '<option value="">— Skip this column —</option>';
+      IMPORT_FIELDS.forEach(function(f){ out += '<option value="'+f.key+'"'+(selected===f.key?" selected":"")+'>'+esc(f.label)+'</option>'; });
+      return out;
+    };
+    var rowsHtml = st.headers.map(function(h){
+      return '<div class="grid2" style="align-items:center;margin-bottom:8px;">' +
+        '<div style="font-size:13px;"><span class="code-pill">'+esc(h)+'</span></div>' +
+        '<select data-import-map="'+esc(h)+'">'+fieldOpts(st.mapping[h]||"")+'</select>' +
+        '</div>';
+    }).join("");
+    html = '<div class="modal-bg" id="import-modal-bg"><div class="modal wide">' +
+      '<button class="close" data-action="close-modal">×</button>' +
+      '<h3>Map your columns</h3>' +
+      '<p class="small">'+st.rows.length+' rows found. Match each column to a field — the ones I could guess are pre-filled. Make sure at least one column maps to Customer Name.</p>' +
+      rowsHtml +
+      '<div id="import-err"></div>' +
+      '<div class="actions"><button class="btn-ghost" data-action="import-back">Back</button><button class="btn-primary" data-action="import-confirm">Import '+st.rows.length+' rows</button></div>' +
+      '</div></div>';
+  }
+  modalLayer.innerHTML = html;
+  var bg = document.getElementById("import-modal-bg");
+  if(bg) bg.addEventListener("click", function(e){ if(e.target.id === "import-modal-bg") closeModal(); });
+}
+function extractNotionDatabaseId(input){
+  var cleaned = (input || "").replace(/-/g, "");
+  var m = cleaned.match(/([0-9a-fA-F]{32})/);
+  if(!m) return "";
+  var hex = m[1].toLowerCase();
+  return hex.slice(0,8)+"-"+hex.slice(8,12)+"-"+hex.slice(12,16)+"-"+hex.slice(16,20)+"-"+hex.slice(20);
+}
+function handleNotionFetch(){
+  var companyEl = document.getElementById("import-company");
+  var dbEl = document.getElementById("notion-db-id");
+  var errEl = document.getElementById("import-err");
+  var dbId = extractNotionDatabaseId(dbEl.value);
+  if(!dbId){ errEl.innerHTML = '<div class="err">Couldn\'t find a database ID in that — paste the full Notion database URL or just the ID.</div>'; return; }
+  APP.importState.companyId = companyEl.value;
+  errEl.innerHTML = '<div class="small">Fetching from Notion…</div>';
+  apiCall("notionFetch", {databaseId: dbId}).then(function(res){
+    if(!res.headers || !res.headers.length){ errEl.innerHTML = '<div class="err">No columns found — double check the database was shared with your integration.</div>'; return; }
+    var mapping = {};
+    res.headers.forEach(function(h){ mapping[h] = guessFieldForHeader(h); });
+    APP.importState.headers = res.headers;
+    APP.importState.rows = res.rows;
+    APP.importState.mapping = mapping;
+    APP.importState.step = 2;
+    renderImportModal();
+  }).catch(function(err){
+    errEl.innerHTML = '<div class="err">'+esc(err.message)+'</div>';
+  });
+}
+function handleImportFileSelected(){
+  var fileEl = document.getElementById("import-file");
+  var companyEl = document.getElementById("import-company");
+  var errEl = document.getElementById("import-err");
+  if(!fileEl.files || !fileEl.files[0]){ errEl.innerHTML = '<div class="err">Choose a CSV file first.</div>'; return; }
+  APP.importState.companyId = companyEl.value;
+  var file = fileEl.files[0];
+  var reader = new FileReader();
+  reader.onload = function(){
+    var parsed = parseCSV(String(reader.result));
+    if(!parsed.headers.length){ errEl.innerHTML = '<div class="err">Couldn\'t find any columns in that file.</div>'; return; }
+    var mapping = {};
+    parsed.headers.forEach(function(h){ mapping[h] = guessFieldForHeader(h); });
+    APP.importState.headers = parsed.headers;
+    APP.importState.rows = parsed.rows;
+    APP.importState.mapping = mapping;
+    APP.importState.step = 2;
+    renderImportModal();
+  };
+  reader.onerror = function(){ errEl.innerHTML = '<div class="err">Couldn\'t read that file.</div>'; };
+  reader.readAsText(file);
+}
+function confirmImport(){
+  var st = APP.importState;
+  var mapping = {};
+  st.headers.forEach(function(h){
+    var sel = document.querySelector('[data-import-map="'+h.replace(/"/g,'\\"')+'"]');
+    mapping[h] = sel ? sel.value : "";
+  });
+  var companyId = st.companyId;
+  var co = APP.companies.filter(function(c){ return c.id === companyId; })[0];
+  var errEl = document.getElementById("import-err");
+  var newDeals = [], skipped = 0;
+  st.rows.forEach(function(row){
+    var deal = emptyDeal(companyId, "csv-import");
+    var hasName = false;
+    st.headers.forEach(function(h){
+      var field = mapping[h];
+      if(!field) return;
+      var val = (row[h] || "").trim();
+      if(!val) return;
+      if(field === "customerName") hasName = true;
+      if(field === "status"){
+        var m1 = STATUSES.filter(function(s){ return s.toLowerCase() === val.toLowerCase(); })[0];
+        deal.status = m1 || "NEW";
+      } else if(field === "solarBattery"){
+        var m2 = SOLAR_BATTERY_OPTS.filter(function(s){ return s.toLowerCase() === val.toLowerCase(); })[0];
+        deal.solarBattery = m2 || val;
+      } else {
+        deal[field] = val;
+      }
+    });
+    if(hasName) newDeals.push(deal); else skipped++;
+  });
+  if(!newDeals.length){
+    errEl.innerHTML = '<div class="err">No rows had a value mapped to Customer Name — nothing to import. Map at least that column.</div>';
+    return;
+  }
+  apiCall("getDeals", {companyId: companyId}).then(function(res){
+    var all = (res.deals || []).concat(newDeals);
+    return apiCall("setDeals", {companyId: companyId, deals: all});
+  }).then(function(){
+    APP.deals = APP.deals.concat(newDeals);
+    APP.importState = null;
+    closeModal();
+    renderApp();
+    pushNotification("admin", newDeals.length + " accounts imported into " + (co?co.name:"a partner") + " via CSV — by " + actorLabel());
+    alert("Imported " + newDeals.length + " account(s)." + (skipped ? (" Skipped " + skipped + " row(s) with no customer name.") : ""));
+  }).catch(function(){
+    errEl.innerHTML = '<div class="err">Import failed — check your connection and try again.</div>';
+  });
+}
+
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
 var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], filterCo:"all", filterStatus:"all", searchQuery:"" };
@@ -459,6 +706,8 @@ function buildAdminView(){
     '<button class="btn-ghost btn-small" data-action="open-admin-team">UNERGY team</button>' +
     '<button class="btn-ghost btn-small" data-action="open-change-password">Change my password</button>' +
     '<button class="btn-ghost btn-small" data-action="open-kpis">KPIs</button>' +
+    '<button class="btn-ghost btn-small" data-action="open-import">Import CSV</button>' +
+    '<button class="btn-ghost btn-small" data-action="open-notion-sync">Sync from Notion</button>' +
     '<button class="btn-teal btn-small" data-action="open-add-deal">+ Add account</button>' +
     '</div></div>';
 
@@ -959,7 +1208,12 @@ function openEditDealModal(dealId){
   else if(deal.createdBy) sub += " · added by " + deal.createdBy;
   var actionsHtml = readOnly ?
     ('<div class="actions"><button class="btn-ghost" data-action="close-modal" style="flex:none;width:100%;">Close</button></div>') :
-    ('<div class="actions"><button class="btn-ghost" data-action="close-modal">Cancel</button>' +
+    ('<label style="display:flex;align-items:center;gap:8px;margin-top:14px;">' +
+       '<input type="checkbox" id="edit-hidden-from-partner"'+(deal.hiddenFromPartner?' checked':'')+'> ' +
+       'Hidden from partner (they won\'t see this account at all — you still will)' +
+     '</label>' +
+     '<div class="actions"><button class="btn-ghost" data-action="close-modal">Cancel</button>' +
+     '<button class="btn-danger" data-action="delete-deal" data-id="'+esc(deal.id)+'">Delete permanently</button>' +
      '<button class="btn-primary" style="margin-top:0" data-action="save-edit-deal" data-id="'+esc(deal.id)+'">Save</button></div>');
   var html = '<div class="modal-bg" id="edit-modal-bg"><div class="modal wide">' +
     '<button class="close" data-action="close-modal">×</button>' +
@@ -982,9 +1236,12 @@ function saveEditDeal(dealId){
   var deal = APP.deals.filter(function(d){ return d.id === dealId; })[0];
   var companyId = deal.companyId;
   var updated = readFieldsFromContainer(containerEl, deal);
+  var hiddenCheckbox = document.getElementById("edit-hidden-from-partner");
+  updated.hiddenFromPartner = hiddenCheckbox ? hiddenCheckbox.checked : !!deal.hiddenFromPartner;
   updated.updatedAt = new Date().toISOString();
   updated.updatedBy = actorLabel();
   var statusChanged = deal.status !== updated.status;
+  var visibilityChanged = !!deal.hiddenFromPartner !== !!updated.hiddenFromPartner;
   apiCall("getDeals", {companyId: companyId}).then(function(res){
     var arr = (res.deals || []).map(function(d){ return d.id === dealId ? updated : d; });
     return apiCall("setDeals", {companyId: companyId, deals: arr});
@@ -993,11 +1250,34 @@ function saveEditDeal(dealId){
     APP.deals = APP.deals.map(function(d){ return d.id === dealId ? updated : d; });
     closeModal();
     renderApp();
-    var msg = statusChanged ?
-      ('Status changed to "'+updated.status+'" for '+(updated.customerName||"a client")+" — by "+actorLabel()) :
-      ('UNERGY updated the account for '+(updated.customerName||"a client")+" — by "+actorLabel());
-    pushNotification(companyId, msg);
+    if(updated.hiddenFromPartner){
+      // No notification when hiding — the whole point is the partner shouldn't know it existed.
+    } else {
+      var msg = statusChanged ?
+        ('Status changed to "'+updated.status+'" for '+(updated.customerName||"a client")+" — by "+actorLabel()) :
+        (visibilityChanged ?
+          ('An account was made visible to you again: '+(updated.customerName||"a client")+" — by "+actorLabel()) :
+          ('UNERGY updated the account for '+(updated.customerName||"a client")+" — by "+actorLabel()));
+      pushNotification(companyId, msg);
+    }
   }).catch(function(){ APP.saveErr = true; renderApp(); });
+}
+function deleteDealPermanently(dealId){
+  var deal = APP.deals.filter(function(d){ return d.id === dealId; })[0];
+  if(!deal) return;
+  var ok1 = window.confirm('Permanently delete the account for "'+(deal.customerName||"this client")+'"? This removes it for both your team and the partner, and can\'t be undone.');
+  if(!ok1) return;
+  var companyId = deal.companyId;
+  apiCall("getDeals", {companyId: companyId}).then(function(res){
+    var arr = (res.deals || []).filter(function(d){ return d.id !== dealId; });
+    return apiCall("setDeals", {companyId: companyId, deals: arr});
+  }).then(function(){
+    APP.deals = APP.deals.filter(function(d){ return d.id !== dealId; });
+    closeModal();
+    renderApp();
+  }).catch(function(){
+    alert("Couldn't delete that account — check your connection and try again.");
+  });
 }
 function openAddDealModal(){
   var initialCompany = APP.companies[0] ? APP.companies[0].id : "";
@@ -1595,6 +1875,12 @@ document.addEventListener("click", function(e){
   else if(action === "send-message"){ sendMessage(id); }
   else if(action === "open-companies"){ openCompaniesModal(); }
   else if(action === "open-kpis"){ openKpisModal(); }
+  else if(action === "open-import"){ openImportModal(); }
+  else if(action === "open-notion-sync"){ openNotionSyncModal(); }
+  else if(action === "notion-fetch"){ handleNotionFetch(); }
+  else if(action === "import-parse"){ handleImportFileSelected(); }
+  else if(action === "import-back"){ APP.importState.step = 1; renderImportModal(); }
+  else if(action === "import-confirm"){ confirmImport(); }
   else if(action === "view-bill-image"){ var imgEl = t.querySelector("img"); if(imgEl) openBillLightbox(imgEl.src); }
   else if(action === "close-lightbox"){ closeLightbox(); }
   else if(action === "add-member"){ addCompanyMember(id); }
@@ -1607,6 +1893,7 @@ document.addEventListener("click", function(e){
   else if(action === "open-edit-deal"){ openEditDealModal(id); }
   else if(action === "close-modal"){ closeModal(); }
   else if(action === "save-edit-deal"){ saveEditDeal(id); }
+  else if(action === "delete-deal"){ deleteDealPermanently(id); }
   else if(action === "save-add-deal"){ saveAddDeal(); }
   else if(action === "add-billing-entry"){ addBillingEntry(); }
   else if(action === "remove-billing-entry"){ removeBillingEntry(t.getAttribute("data-idx")); }
