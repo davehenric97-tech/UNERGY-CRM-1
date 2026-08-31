@@ -834,7 +834,15 @@ function pollLiveUpdates(){
     }).catch(function(){}));
   }
   if(!calls.length) return;
-  Promise.all(calls).then(function(){ renderApp(); });
+  Promise.all(calls).then(function(){
+    // Don't rebuild the page while someone's actively filling out the
+    // Submit a Client form — that form lives on the main page (not a
+    // popup), so a rebuild would wipe out anything they've typed.
+    // The data is still refreshed underneath; it'll show as soon as
+    // they switch tabs or the form is submitted.
+    var formInProgress = APP.session && APP.session.role !== "admin" && APP.partnerTab === "submit";
+    if(!formInProgress) renderApp();
+  });
 }
 function startLiveUpdatePolling(){
   if(liveUpdateTimer) clearInterval(liveUpdateTimer);
