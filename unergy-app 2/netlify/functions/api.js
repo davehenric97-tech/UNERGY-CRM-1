@@ -250,7 +250,7 @@ async function bootstrapIfNeeded() {
   const submitCode = genCode();
 
   const seedCo = {
-    id: coId, name: "SunSaver", submitCode,
+    id: coId, name: "SunSaver", submitCode, apiKey: crypto.randomBytes(20).toString("hex"),
     people: [{ id: demoId, name: "Demo Reviewer", email: "demo@sunsaver.com" }],
   };
   await setJSON("admin-team", [{ id: adminId, name: "UNERGY Admin", email: "admin@unergypowercompany.com" }]);
@@ -265,6 +265,7 @@ async function bootstrapIfNeeded() {
     passwordHash: demoHash, salt: demoSalt,
   });
   await setJSON("submitcode-" + submitCode, { companyId: coId, companyName: "SunSaver" });
+  await setJSON("apikey-" + seedCo.apiKey, { companyId: coId, companyName: "SunSaver" });
   await setJSON("deals-" + coId, []);
 }
 
@@ -280,9 +281,15 @@ function requireCompanyAccess(session, companyId) {
 }
 function stripPeopleSecrets(companies) {
   return companies.map((c) => ({
-    id: c.id, name: c.name, submitCode: c.submitCode,
+    id: c.id, name: c.name, submitCode: c.submitCode, apiKey: c.apiKey || null,
     people: (c.people || []).map((p) => ({ id: p.id, name: p.name, email: p.email })),
   }));
+}
+
+// ---------- external partner API (a company's own software calls this — never a browser session) ----------
+function stripDealForApi(d) {
+  const { billingLog, hiddenFromPartner, ...rest } = d;
+  return rest;
 }
 
 // ---------- main handler ----------
@@ -302,10 +309,27 @@ exports.handler = async (event) => {
 
   const authHeader = event.headers.authorization || event.headers.Authorization || "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
-  const session = verifyToken(token);
+  let session = verifyToken(token);
+
+  // A partner's own software authenticates with a per-company API key instead
+  // of a browser session token — completely separate credential, completely
+  // separate (much narrower) set of things it's allowed to do.
+  const partnerApiKey = event.headers["x-partner-api-key"] || event.headers["X-Partner-Api-Key"];
+  let isPartnerApiKey = false;
+  if (!session && partnerApiKey) {
+    const mapping = await getJSON("apikey-" + partnerApiKey);
+    if (mapping) {
+      session = { role: "partner-api", companyId: mapping.companyId, companyName: mapping.companyName };
+      isPartnerApiKey = true;
+    }
+  }
 
   try {
     await bootstrapIfNeeded();
+
+    if (isPartnerApiKey && action !== "apiListAccounts" && action !== "apiSubmitAccount") {
+      const e = new Error("This API key can only be used with apiListAccounts and apiSubmitAccount"); e.status = 403; throw e;
+    }
 
     switch (action) {
       case "login": {
@@ -349,6 +373,16 @@ exports.handler = async (event) => {
       case "getCompanies": {
         requireAdmin(session);
         const companies = (await getJSON("companies")) || [];
+        // Self-heal: any company created before API keys existed gets one now.
+        let changed = false;
+        for (const co of companies) {
+          if (!co.apiKey) {
+            co.apiKey = crypto.randomBytes(20).toString("hex");
+            await setJSON("apikey-" + co.apiKey, { companyId: co.id, companyName: co.name });
+            changed = true;
+          }
+        }
+        if (changed) await setJSON("companies", companies);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -356,11 +390,26 @@ exports.handler = async (event) => {
         requireAdmin(session);
         const companies = (await getJSON("companies")) || [];
         const submitCode = await genUniqueSubmitCode();
-        const co = { id: "co_" + crypto.randomBytes(4).toString("hex"), name: p.name, submitCode, people: [] };
+        const apiKey = crypto.randomBytes(20).toString("hex");
+        const co = { id: "co_" + crypto.randomBytes(4).toString("hex"), name: p.name, submitCode, apiKey, people: [] };
         companies.push(co);
         await setJSON("companies", companies);
         await setJSON("submitcode-" + submitCode, { companyId: co.id, companyName: co.name });
+        await setJSON("apikey-" + apiKey, { companyId: co.id, companyName: co.name });
         await setJSON("deals-" + co.id, []);
+        return ok(cors, { companies: stripPeopleSecrets(companies) });
+      }
+
+      case "regenApiKey": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const co = companies.find((c) => c.id === p.companyId);
+        if (!co) { const e = new Error("Company not found"); e.status = 404; throw e; }
+        if (co.apiKey) await del("apikey-" + co.apiKey);
+        const newKey = crypto.randomBytes(20).toString("hex");
+        co.apiKey = newKey;
+        await setJSON("companies", companies);
+        await setJSON("apikey-" + newKey, { companyId: co.id, companyName: co.name });
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -371,6 +420,7 @@ exports.handler = async (event) => {
         if (co) {
           for (const person of co.people || []) await del("login-" + normEmail(person.email));
           await del("submitcode-" + co.submitCode);
+          if (co.apiKey) await del("apikey-" + co.apiKey);
           await del("deals-" + co.id);
         }
         const next = companies.filter((c) => c.id !== p.companyId);
@@ -603,6 +653,39 @@ exports.handler = async (event) => {
         if (!p.databaseId) { const e = new Error("Missing database ID"); e.status = 400; throw e; }
         const data = await fetchNotionDatabase(p.databaseId, notionKey);
         return ok(cors, data);
+      }
+
+      case "apiListAccounts": {
+        if (!session || session.role !== "partner-api") { const e = new Error("Unauthorized"); e.status = 401; throw e; }
+        const deals = (await getJSON("deals-" + session.companyId)) || [];
+        const visible = deals.filter((d) => !d.hiddenFromPartner).map(stripDealForApi);
+        return ok(cors, { accounts: visible });
+      }
+
+      case "apiSubmitAccount": {
+        if (!session || session.role !== "partner-api") { const e = new Error("Unauthorized"); e.status = 401; throw e; }
+        if (!p.customerName) { const e = new Error("customerName is required"); e.status = 400; throw e; }
+        const now = new Date().toISOString();
+        const newAccount = {
+          id: "acct_" + crypto.randomBytes(6).toString("hex"),
+          companyId: session.companyId, source: "api",
+          customerName: p.customerName || "", businessName: p.businessName || "", ownsOrRents: p.ownsOrRents || "",
+          email: p.email || "", phone: p.phone || "", serviceAddress: p.serviceAddress || "", billingAddress: p.billingAddress || "",
+          solarBattery: p.solarBattery || "Solar and Battery", propertyType: p.propertyType || "Residential",
+          tdu: p.tdu || "", currentREP: p.currentREP || "", esiid: p.esiid || "",
+          contractTerm: p.contractTerm || "12", priceKWH: p.priceKWH || "", salesRepName: p.salesRepName || "",
+          intakeDate: now.slice(0, 10), contractSentDate: "", contractSignedDate: "", startDate: "",
+          status: "NEW", notes: p.notes || "", billFile: null,
+          switchHold: "No", paymentStatus: "Current", vppEnabled: "No", batteryBrand: "", billingLog: [],
+          createdAt: now, updatedAt: now, createdBy: "API — " + session.companyName, updatedBy: "API — " + session.companyName,
+        };
+        const deals = (await getJSON("deals-" + session.companyId)) || [];
+        deals.push(newAccount);
+        await setJSON("deals-" + session.companyId, deals);
+        const notifs = (await getJSON("notif-admin")) || [];
+        notifs.unshift({ id: "ntf_" + crypto.randomBytes(4).toString("hex"), message: session.companyName + " submitted a new client via API: " + newAccount.customerName, createdAt: now, read: false });
+        await setJSON("notif-admin", notifs.slice(0, 60));
+        return ok(cors, { account: stripDealForApi(newAccount) });
       }
 
       case "sendMessage": {
