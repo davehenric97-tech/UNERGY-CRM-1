@@ -281,15 +281,68 @@ function requireCompanyAccess(session, companyId) {
 }
 function stripPeopleSecrets(companies) {
   return companies.map((c) => ({
-    id: c.id, name: c.name, submitCode: c.submitCode, apiKey: c.apiKey || null,
+    id: c.id, name: c.name, submitCode: c.submitCode, apiKey: c.apiKey || null, notifyEmail: c.notifyEmail || "",
     people: (c.people || []).map((p) => ({ id: p.id, name: p.name, email: p.email })),
   }));
 }
 
+// ---------- email notifications (Resend — best-effort, never blocks a submission from saving) ----------
+async function sendEmail(to, subject, html) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const list = Array.isArray(to) ? to.filter(Boolean) : [to].filter(Boolean);
+  if (!apiKey || !list.length) return;
+  const from = process.env.NOTIFY_FROM_EMAIL || "UNERGY CRM <onboarding@resend.dev>";
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to: list, subject, html }),
+    });
+  } catch (e) { /* email is a courtesy notification — a failure here must never block the deal from saving */ }
+}
+async function notifyNewSubmission(deal, companyName, companyNotifyEmail) {
+  const adminList = (process.env.NOTIFY_ADMIN_EMAILS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const customerLine = deal.customerName || "a client";
+  const addressLine = deal.serviceAddress ? `<p>Service address: ${escapeHtml(deal.serviceAddress)}</p>` : "";
+  if (adminList.length) {
+    await sendEmail(
+      adminList,
+      "New deal submitted — " + customerLine,
+      `<p><strong>${escapeHtml(companyName)}</strong> just submitted a new account: <strong>${escapeHtml(customerLine)}</strong>. This needs prompt attention.</p>${addressLine}<p>Log in to UNERGY CRM to review it.</p>`
+    );
+  }
+  if (companyNotifyEmail) {
+    await sendEmail(
+      companyNotifyEmail,
+      "Your submission was received — " + customerLine,
+      `<p>Thanks — we've received your submission for <strong>${escapeHtml(customerLine)}</strong>. UNERGY will follow up shortly.</p>`
+    );
+  }
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 // ---------- external partner API (a company's own software calls this — never a browser session) ----------
 function stripDealForApi(d) {
-  const { billingLog, hiddenFromPartner, ...rest } = d;
+  // billFile is dropped from LIST responses (it's a full base64 image and
+  // would bloat a "give me everyone's status" call) but is still fully
+  // stored and visible to both sides in the actual web dashboard.
+  const { billingLog, hiddenFromPartner, billFile, ...rest } = d;
   return rest;
+}
+const MAX_BILL_FILE_B64_CHARS = 6 * 1024 * 1024; // ~4.5MB decoded — keeps total request comfortably under Netlify's payload limit
+function validateBillFile(billFile) {
+  if (!billFile) return null;
+  if (typeof billFile !== "object" || !billFile.dataUrl || !billFile.dataUrl.startsWith("data:")) {
+    const e = new Error("billFile must be an object with a dataUrl (a data: URL, e.g. what FileReader.readAsDataURL produces)");
+    e.status = 400; throw e;
+  }
+  if (billFile.dataUrl.length > MAX_BILL_FILE_B64_CHARS) {
+    const e = new Error("billFile is too large — please compress it below ~4.5MB before sending");
+    e.status = 400; throw e;
+  }
+  return { name: billFile.name || "bill", type: billFile.type || "application/octet-stream", dataUrl: billFile.dataUrl };
 }
 
 // ---------- main handler ----------
@@ -438,6 +491,16 @@ exports.handler = async (event) => {
         co.submitCode = newCode;
         await setJSON("companies", companies);
         await setJSON("submitcode-" + newCode, { companyId: co.id, companyName: co.name });
+        return ok(cors, { companies: stripPeopleSecrets(companies) });
+      }
+
+      case "setNotifyEmail": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const co = companies.find((c) => c.id === p.companyId);
+        if (!co) { const e = new Error("Company not found"); e.status = 404; throw e; }
+        co.notifyEmail = (p.email || "").trim();
+        await setJSON("companies", companies);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -598,6 +661,9 @@ exports.handler = async (event) => {
         const deals = (await getJSON("deals-" + session.companyId)) || [];
         deals.push(p.deal);
         await setJSON("deals-" + session.companyId, deals);
+        const companiesForNotify = (await getJSON("companies")) || [];
+        const coForNotify = companiesForNotify.find((c) => c.id === session.companyId);
+        await notifyNewSubmission(p.deal, session.companyName, coForNotify && coForNotify.notifyEmail).catch(() => {});
         return ok(cors, { done: true });
       }
 
@@ -675,7 +741,7 @@ exports.handler = async (event) => {
           tdu: p.tdu || "", currentREP: p.currentREP || "", esiid: p.esiid || "",
           contractTerm: p.contractTerm || "12", priceKWH: p.priceKWH || "", salesRepName: p.salesRepName || "",
           intakeDate: now.slice(0, 10), contractSentDate: "", contractSignedDate: "", startDate: "",
-          status: "NEW", notes: p.notes || "", billFile: null,
+          status: "NEW", notes: p.notes || "", billFile: validateBillFile(p.billFile),
           switchHold: "No", paymentStatus: "Current", vppEnabled: "No", batteryBrand: "", billingLog: [],
           createdAt: now, updatedAt: now, createdBy: "API — " + session.companyName, updatedBy: "API — " + session.companyName,
         };
@@ -685,6 +751,9 @@ exports.handler = async (event) => {
         const notifs = (await getJSON("notif-admin")) || [];
         notifs.unshift({ id: "ntf_" + crypto.randomBytes(4).toString("hex"), message: session.companyName + " submitted a new client via API: " + newAccount.customerName, createdAt: now, read: false });
         await setJSON("notif-admin", notifs.slice(0, 60));
+        const companiesForNotify2 = (await getJSON("companies")) || [];
+        const coForNotify2 = companiesForNotify2.find((c) => c.id === session.companyId);
+        await notifyNewSubmission(newAccount, session.companyName, coForNotify2 && coForNotify2.notifyEmail).catch(() => {});
         return ok(cors, { account: stripDealForApi(newAccount) });
       }
 
