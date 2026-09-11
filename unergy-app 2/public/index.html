@@ -1696,6 +1696,10 @@ function renderCompaniesModal(){
       '<div class="code-line"><span class="lbl">Submit-a-client access code (no login, shared)</span>' +
       '<span><span class="code-pill">'+esc(c.submitCode)+'</span> ' +
       '<button class="btn-ghost btn-small" data-action="regen-submit-code" data-id="'+esc(c.id)+'">New</button></span></div>' +
+      '<div class="code-line"><span class="lbl">API key (for their own software — read accounts + submit new clients)</span>' +
+      '<span><span class="code-pill" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom;">'+esc(c.apiKey||"—")+'</span> ' +
+      '<button class="btn-ghost btn-small" data-action="copy-api-key" data-id="'+esc(c.id)+'">Copy</button> ' +
+      '<button class="btn-ghost btn-small" data-action="regen-api-key" data-id="'+esc(c.id)+'">New</button></span></div>' +
       '<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px;"><div class="small" style="margin-bottom:6px;">Review access (named logins)</div>' +
       (memberRows ? memberRows : '<div class="small">No people added yet.</div>') + '</div>' +
       '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
@@ -1947,6 +1951,23 @@ document.addEventListener("click", function(e){
   else if(action === "reset-admin-pw"){ resetAdminMemberPassword(id); }
   else if(action === "regen-submit-code"){
     apiCall("regenSubmitCode", {companyId: id}).then(function(res){ APP.companies = res.companies; renderCompaniesModal(); });
+  }
+  else if(action === "copy-api-key"){
+    var co = APP.companies.filter(function(c){ return c.id === id; })[0];
+    if(co && co.apiKey){
+      if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(co.apiKey);
+      alert("API key copied:\n\n" + co.apiKey);
+    }
+  }
+  else if(action === "regen-api-key"){
+    var ok1 = window.confirm("Generate a new API key for this partner? Their existing key will stop working immediately — anything already using the old one will need updating.");
+    if(!ok1) return;
+    apiCall("regenApiKey", {companyId: id}).then(function(res){
+      APP.companies = res.companies;
+      renderCompaniesModal();
+      var co2 = res.companies.filter(function(c){ return c.id === id; })[0];
+      if(co2) alert("New API key:\n\n" + co2.apiKey + "\n\nGive this to the partner — the old key no longer works.");
+    });
   }
   else if(action === "remove-company"){
     apiCall("removeCompany", {companyId: id}).then(function(res){
