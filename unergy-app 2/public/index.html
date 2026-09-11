@@ -1114,13 +1114,42 @@ function billPreviewHtml(billFile){
   if(billFile.type === "application/pdf") return '<div class="bill-file-pill">📄 '+esc(billFile.name)+' — <a class="linklike" href="'+billFile.dataUrl+'" target="_blank" rel="noopener">open</a></div>';
   return '<div data-action="view-bill-image" style="cursor:zoom-in;display:inline-block;"><img src="'+billFile.dataUrl+'" class="bill-thumb" alt="Electric bill — click to enlarge"></div>';
 }
+var lightboxZoomLevel = 1;
 function openBillLightbox(src){
-  lightboxLayer.innerHTML = '<div class="modal-bg" id="lightbox-bg" style="z-index:80;align-items:center;background:rgba(6,10,18,.88);">' +
-    '<img src="'+src+'" style="max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.5);">' +
+  lightboxZoomLevel = 1;
+  lightboxLayer.innerHTML = '<div class="modal-bg" id="lightbox-bg" style="z-index:80;align-items:center;justify-content:center;background:rgba(6,10,18,.92);padding:20px;">' +
+    '<div id="lightbox-scroll" style="max-width:96vw;max-height:92vh;overflow:auto;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.5);">' +
+      '<img id="lightbox-img" src="'+src+'" data-action="lightbox-toggle-zoom" style="display:block;max-width:96vw;max-height:92vh;cursor:zoom-in;">' +
+    '</div>' +
+    '<div style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;gap:8px;">' +
+      '<button data-action="lightbox-zoom-out" style="background:rgba(0,0,0,.65);color:#fff;border:none;border-radius:6px;width:40px;height:40px;font-size:20px;cursor:pointer;">−</button>' +
+      '<button data-action="lightbox-zoom-reset" style="background:rgba(0,0,0,.65);color:#fff;border:none;border-radius:6px;padding:0 16px;height:40px;font-size:13px;cursor:pointer;">Fit to screen</button>' +
+      '<button data-action="lightbox-zoom-in" style="background:rgba(0,0,0,.65);color:#fff;border:none;border-radius:6px;width:40px;height:40px;font-size:20px;cursor:pointer;">+</button>' +
+    '</div>' +
+    '<div style="position:fixed;bottom:72px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.65);font-size:11px;">Click the image, or use +/−, to zoom in and read fine print. Drag/scroll to pan around while zoomed.</div>' +
     '<button data-action="close-lightbox" style="position:fixed;top:20px;right:24px;background:rgba(0,0,0,.55);color:#fff;border-radius:50%;width:38px;height:38px;font-size:22px;border:none;cursor:pointer;">×</button>' +
     '</div>';
   document.getElementById("lightbox-bg").addEventListener("click", function(e){ if(e.target.id === "lightbox-bg") closeLightbox(); });
 }
+function setLightboxZoom(level){
+  lightboxZoomLevel = Math.max(1, Math.min(level, 4));
+  var img = document.getElementById("lightbox-img");
+  if(!img) return;
+  if(lightboxZoomLevel === 1){
+    img.style.maxWidth = "96vw"; img.style.maxHeight = "92vh";
+    img.style.transform = ""; img.style.cursor = "zoom-in";
+  } else {
+    // Drop the fit-to-screen cap so the image renders at its real pixel
+    // resolution, then scale further on top of that — this is what
+    // actually reveals fine print that "fit to screen" was hiding,
+    // not just a blurry CSS blow-up of an already-shrunk image.
+    img.style.maxWidth = "none"; img.style.maxHeight = "none";
+    img.style.transform = "scale(" + lightboxZoomLevel + ")";
+    img.style.transformOrigin = "top left";
+    img.style.cursor = "zoom-out";
+  }
+}
+function toggleLightboxZoom(){ setLightboxZoom(lightboxZoomLevel === 1 ? 2 : 1); }
 function closeLightbox(){ lightboxLayer.innerHTML = ""; }
 function latestBillingEntry(log){
   if(!log || log.length === 0) return null;
@@ -1700,6 +1729,9 @@ function renderCompaniesModal(){
       '<span><span class="code-pill" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom;">'+esc(c.apiKey||"—")+'</span> ' +
       '<button class="btn-ghost btn-small" data-action="copy-api-key" data-id="'+esc(c.id)+'">Copy</button> ' +
       '<button class="btn-ghost btn-small" data-action="regen-api-key" data-id="'+esc(c.id)+'">New</button></span></div>' +
+      '<div style="margin-top:8px;"><div class="small" style="margin-bottom:4px;">Notification email — gets a "submission received" email every time this partner submits a client</div>' +
+      '<div style="display:flex;gap:6px;"><input data-notify-for="'+esc(c.id)+'" type="email" placeholder="leads@partner.com" value="'+esc(c.notifyEmail||"")+'" style="flex:1;">' +
+      '<button class="btn-ghost btn-small" data-action="save-notify-email" data-id="'+esc(c.id)+'">Save</button></div></div>' +
       '<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px;"><div class="small" style="margin-bottom:6px;">Review access (named logins)</div>' +
       (memberRows ? memberRows : '<div class="small">No people added yet.</div>') + '</div>' +
       '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
@@ -1923,6 +1955,10 @@ document.addEventListener("click", function(e){
   else if(action === "import-confirm"){ confirmImport(); }
   else if(action === "view-bill-image"){ var imgEl = t.querySelector("img"); if(imgEl) openBillLightbox(imgEl.src); }
   else if(action === "close-lightbox"){ closeLightbox(); }
+  else if(action === "lightbox-toggle-zoom"){ toggleLightboxZoom(); }
+  else if(action === "lightbox-zoom-in"){ setLightboxZoom(lightboxZoomLevel + 0.5); }
+  else if(action === "lightbox-zoom-out"){ setLightboxZoom(lightboxZoomLevel - 0.5); }
+  else if(action === "lightbox-zoom-reset"){ setLightboxZoom(1); }
   else if(action === "add-member"){ addCompanyMember(id); }
   else if(action === "remove-member"){ removeCompanyMember(id, t.getAttribute("data-mid")); }
   else if(action === "open-admin-team"){ openAdminTeamModal(); }
@@ -1968,6 +2004,14 @@ document.addEventListener("click", function(e){
       var co2 = res.companies.filter(function(c){ return c.id === id; })[0];
       if(co2) alert("New API key:\n\n" + co2.apiKey + "\n\nGive this to the partner — the old key no longer works.");
     });
+  }
+  else if(action === "save-notify-email"){
+    var emailEl = document.querySelector('[data-notify-for="'+id+'"]');
+    var email = emailEl ? emailEl.value.trim() : "";
+    apiCall("setNotifyEmail", {companyId: id, email: email}).then(function(res){
+      APP.companies = res.companies;
+      renderCompaniesModal();
+    }).catch(function(err){ alert(err.message || "Couldn't save that email."); });
   }
   else if(action === "remove-company"){
     apiCall("removeCompany", {companyId: id}).then(function(res){
