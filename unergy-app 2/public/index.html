@@ -1027,15 +1027,11 @@ function buildSubmitTabContent(isRepOnly){
   return html;
 }
 function energyContractFieldsHtml(){
-  var fullCapture = !!(APP.session && APP.session.demoFullCapture);
-  var banner = fullCapture ?
-    '<div class="err" style="margin-bottom:12px;">⚠️ Demo mode is ON — full numbers entered below will be stored, not just the last 4. Use test data only, never a real SSN or card number.</div>' : '';
   return '<div class="panel-box" style="margin-top:16px;background:var(--panel2);">' +
-    banner +
     '<h3 style="margin-top:0;">Additional information — Energy Contract</h3>' +
     '<label>Social Security Number</label>' +
     '<input type="text" id="energy-ssn" placeholder="123-45-6789" maxlength="11" autocomplete="off">' +
-    '<div class="small" style="margin-top:-6px;margin-bottom:14px;">Used only to verify identity — no credit check is run. '+(fullCapture ? 'Demo mode is currently ON for this form.' : 'Only the last 4 digits are ever stored.')+'</div>' +
+    '<div class="small" style="margin-top:-6px;margin-bottom:14px;">Used only to verify identity — no credit check is run.</div>' +
 
     '<label>Payment Information</label>' +
     '<div class="tabs" style="margin-bottom:10px;">' +
