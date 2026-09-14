@@ -251,6 +251,7 @@ async function bootstrapIfNeeded() {
 
   const seedCo = {
     id: coId, name: "SunSaver", submitCode, apiKey: crypto.randomBytes(20).toString("hex"),
+    vppFormEnabled: true, energyFormEnabled: false, energyFormCode: null,
     people: [{ id: demoId, name: "Demo Reviewer", email: "demo@sunsaver.com" }],
   };
   await setJSON("admin-team", [{ id: adminId, name: "UNERGY Admin", email: "admin@unergypowercompany.com" }]);
@@ -279,9 +280,16 @@ function requireCompanyAccess(session, companyId) {
   if (session.role === "partner-review" && session.companyId === companyId) return;
   const e = new Error("Forbidden"); e.status = 403; throw e;
 }
+// ---------- demo-mode toggle: full-number capture for testing (off by default) ----------
+async function getDemoFullCapture() {
+  const s = await getJSON("app-settings");
+  return !!(s && s.demoFullCapture);
+}
+
 function stripPeopleSecrets(companies) {
   return companies.map((c) => ({
     id: c.id, name: c.name, submitCode: c.submitCode, apiKey: c.apiKey || null, notifyEmail: c.notifyEmail || "",
+    vppFormEnabled: c.vppFormEnabled !== false, energyFormCode: c.energyFormCode || null, energyFormEnabled: !!c.energyFormEnabled,
     people: (c.people || []).map((p) => ({ id: p.id, name: p.name, email: p.email })),
   }));
 }
@@ -395,15 +403,28 @@ exports.handler = async (event) => {
           ? { role: "admin", personName: entry.personName, personEmail: entry.personEmail }
           : { role: "partner-review", companyId: entry.companyId, companyName: entry.companyName,
               personName: entry.personName, personEmail: entry.personEmail };
-        return ok(cors, { token: signToken(sessionPayload), session: sessionPayload });
+        return ok(cors, { token: signToken(sessionPayload), session: sessionPayload, demoFullCapture: await getDemoFullCapture() });
       }
 
       case "submitCode": {
         const code = (p.code || "").trim().toUpperCase();
-        const entry = await getJSON("submitcode-" + code);
-        if (!entry) { const e = new Error("Access code not recognized"); e.status = 401; throw e; }
-        const sessionPayload = { role: "partner-rep", companyId: entry.companyId, companyName: entry.companyName };
-        return ok(cors, { token: signToken(sessionPayload), session: sessionPayload });
+        const vppEntry = await getJSON("submitcode-" + code);
+        if (vppEntry) {
+          const companies = (await getJSON("companies")) || [];
+          const co = companies.find((c) => c.id === vppEntry.companyId);
+          if (!co || co.vppFormEnabled === false) { const e = new Error("This form isn't currently accepting submissions"); e.status = 403; throw e; }
+          const sessionPayload = { role: "partner-rep", companyId: vppEntry.companyId, companyName: vppEntry.companyName, formType: "vpp" };
+          return ok(cors, { token: signToken(sessionPayload), session: sessionPayload, demoFullCapture: await getDemoFullCapture() });
+        }
+        const energyEntry = await getJSON("energycode-" + code);
+        if (energyEntry) {
+          const companies = (await getJSON("companies")) || [];
+          const co = companies.find((c) => c.id === energyEntry.companyId);
+          if (!co || !co.energyFormEnabled) { const e = new Error("This form isn't currently accepting submissions"); e.status = 403; throw e; }
+          const sessionPayload = { role: "partner-rep", companyId: energyEntry.companyId, companyName: energyEntry.companyName, formType: "energy" };
+          return ok(cors, { token: signToken(sessionPayload), session: sessionPayload, demoFullCapture: await getDemoFullCapture() });
+        }
+        const e = new Error("Access code not recognized"); e.status = 401; throw e;
       }
 
       case "changeMyPassword": {
@@ -444,7 +465,7 @@ exports.handler = async (event) => {
         const companies = (await getJSON("companies")) || [];
         const submitCode = await genUniqueSubmitCode();
         const apiKey = crypto.randomBytes(20).toString("hex");
-        const co = { id: "co_" + crypto.randomBytes(4).toString("hex"), name: p.name, submitCode, apiKey, people: [] };
+        const co = { id: "co_" + crypto.randomBytes(4).toString("hex"), name: p.name, submitCode, apiKey, vppFormEnabled: true, energyFormEnabled: false, energyFormCode: null, people: [] };
         companies.push(co);
         await setJSON("companies", companies);
         await setJSON("submitcode-" + submitCode, { companyId: co.id, companyName: co.name });
@@ -474,6 +495,7 @@ exports.handler = async (event) => {
           for (const person of co.people || []) await del("login-" + normEmail(person.email));
           await del("submitcode-" + co.submitCode);
           if (co.apiKey) await del("apikey-" + co.apiKey);
+          if (co.energyFormCode) await del("energycode-" + co.energyFormCode);
           await del("deals-" + co.id);
         }
         const next = companies.filter((c) => c.id !== p.companyId);
@@ -492,6 +514,55 @@ exports.handler = async (event) => {
         await setJSON("companies", companies);
         await setJSON("submitcode-" + newCode, { companyId: co.id, companyName: co.name });
         return ok(cors, { companies: stripPeopleSecrets(companies) });
+      }
+
+      case "setVppFormEnabled": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const co = companies.find((c) => c.id === p.companyId);
+        if (!co) { const e = new Error("Company not found"); e.status = 404; throw e; }
+        co.vppFormEnabled = !!p.enabled;
+        await setJSON("companies", companies);
+        return ok(cors, { companies: stripPeopleSecrets(companies) });
+      }
+
+      case "setEnergyFormEnabled": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const co = companies.find((c) => c.id === p.companyId);
+        if (!co) { const e = new Error("Company not found"); e.status = 404; throw e; }
+        co.energyFormEnabled = !!p.enabled;
+        if (co.energyFormEnabled && !co.energyFormCode) {
+          const newCode = await genUniqueSubmitCode();
+          co.energyFormCode = newCode;
+          await setJSON("energycode-" + newCode, { companyId: co.id, companyName: co.name });
+        }
+        await setJSON("companies", companies);
+        return ok(cors, { companies: stripPeopleSecrets(companies) });
+      }
+
+      case "regenEnergyCode": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const co = companies.find((c) => c.id === p.companyId);
+        if (!co) { const e = new Error("Company not found"); e.status = 404; throw e; }
+        if (co.energyFormCode) await del("energycode-" + co.energyFormCode);
+        const newCode = await genUniqueSubmitCode();
+        co.energyFormCode = newCode;
+        await setJSON("companies", companies);
+        await setJSON("energycode-" + newCode, { companyId: co.id, companyName: co.name });
+        return ok(cors, { companies: stripPeopleSecrets(companies) });
+      }
+
+      case "getAppSettings": {
+        requireAdmin(session);
+        return ok(cors, { demoFullCapture: await getDemoFullCapture() });
+      }
+
+      case "setDemoFullCapture": {
+        requireAdmin(session);
+        await setJSON("app-settings", { demoFullCapture: !!p.enabled });
+        return ok(cors, { demoFullCapture: !!p.enabled });
       }
 
       case "setNotifyEmail": {
