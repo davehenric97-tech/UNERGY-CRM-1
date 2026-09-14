@@ -570,7 +570,7 @@ function confirmImport(){
 
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
-var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], filterCo:"all", filterStatus:"all", searchQuery:"" };
+var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], filterCo:"all", filterStatus:"all", searchQuery:"" };
 var gridRefreshTimer = null;
 var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
@@ -995,15 +995,28 @@ function buildPartnerView(){
   return html;
 }
 
+function currentSubmitFormType(isRepOnly){
+  if(isRepOnly) return APP.session.formType || "vpp";
+  return APP.reviewSubmitFormType || "vpp";
+}
 function buildSubmitTabContent(isRepOnly){
+  var formType = currentSubmitFormType(isRepOnly);
   var data = emptyDeal(APP.session.companyId, isRepOnly ? "rep" : "partner");
   pendingBillFile = null;
   var intro = isRepOnly ?
-    ('<h2 style="margin:4px 0 2px;">Submit a client</h2><p class="small">'+esc(APP.session.companyName)+' · this goes straight to UNERGY, unreviewed.</p>') :
+    ('<h2 style="margin:4px 0 2px;">Submit a client'+(formType==="energy"?" — Energy Contract":"")+'</h2><p class="small">'+esc(APP.session.companyName)+' · this goes straight to UNERGY, unreviewed.</p>') :
     '';
-  var html = intro + '<div class="panel-box" id="submit-panel" style="margin-top:'+(isRepOnly?'18px':'16px')+';">' +
+  var formPicker = "";
+  if(!isRepOnly){
+    formPicker = '<div class="tabs" style="margin-bottom:14px;">' +
+      '<button class="tab-btn '+(formType==="vpp"?"active":"")+'" data-action="review-form-type" data-tab="vpp">VPP Contract</button>' +
+      '<button class="tab-btn '+(formType==="energy"?"active":"")+'" data-action="review-form-type" data-tab="energy">Energy Contract</button>' +
+      '</div>';
+  }
+  var html = intro + formPicker + '<div class="panel-box" id="submit-panel" style="margin-top:'+(isRepOnly?'18px':'0px')+';">' +
     '<div id="submit-success"></div>' +
     '<div id="submit-fields">' + accountFieldsHtml(data, {readOnly:false, showStatusBlock:false}) + '</div>' +
+    (formType === "energy" ? energyContractFieldsHtml() : "") +
     '<div class="actions"><button class="btn-primary" style="margin-top:0" data-action="save-partner-add-deal">Submit client</button></div>' +
     '</div>';
   // wire after insertion — done in a microtask via requestAnimationFrame since this returns a string
@@ -1012,6 +1025,65 @@ function buildSubmitTabContent(isRepOnly){
     if(container) wireBillUpload(container);
   });
   return html;
+}
+function energyContractFieldsHtml(){
+  var fullCapture = !!(APP.session && APP.session.demoFullCapture);
+  var banner = fullCapture ?
+    '<div class="err" style="margin-bottom:12px;">⚠️ Demo mode is ON — full numbers entered below will be stored, not just the last 4. Use test data only, never a real SSN or card number.</div>' : '';
+  return '<div class="panel-box" style="margin-top:16px;background:var(--panel2);">' +
+    banner +
+    '<h3 style="margin-top:0;">Additional information — Energy Contract</h3>' +
+    '<label>Social Security Number</label>' +
+    '<input type="text" id="energy-ssn" placeholder="123-45-6789" maxlength="11" autocomplete="off">' +
+    '<div class="small" style="margin-top:-6px;margin-bottom:14px;">Used only to verify identity — no credit check is run. '+(fullCapture ? 'Demo mode is currently ON for this form.' : 'Only the last 4 digits are ever stored.')+'</div>' +
+
+    '<label>Payment Information</label>' +
+    '<div class="tabs" style="margin-bottom:10px;">' +
+      '<button type="button" class="tab-btn active" data-action="pay-tab-switch" data-tab="credit" id="pay-tabbtn-credit">Credit</button>' +
+      '<button type="button" class="tab-btn" data-action="pay-tab-switch" data-tab="debit" id="pay-tabbtn-debit">Debit</button>' +
+      '<button type="button" class="tab-btn" data-action="pay-tab-switch" data-tab="ach" id="pay-tabbtn-ach">ACH</button>' +
+    '</div>' +
+
+    '<div id="pay-panel-credit" class="pay-tab-panel">' +
+      '<div class="grid2">' +
+        '<div><label>Card number</label><input type="text" id="pay-credit-number" placeholder="•••• •••• •••• ••••" autocomplete="off"></div>' +
+        '<div><label>Name on card</label><input type="text" id="pay-credit-name" autocomplete="off"></div>' +
+      '</div>' +
+      '<div class="grid2">' +
+        '<div><label>Expiration (MM/YY)</label><input type="text" id="pay-credit-exp" placeholder="MM/YY" autocomplete="off"></div>' +
+        '<div><label>CVV</label><input type="text" id="pay-credit-cvv" placeholder="123" maxlength="4" autocomplete="off"></div>' +
+      '</div>' +
+    '</div>' +
+
+    '<div id="pay-panel-debit" class="pay-tab-panel" style="display:none;">' +
+      '<div class="grid2">' +
+        '<div><label>Card number</label><input type="text" id="pay-debit-number" placeholder="•••• •••• •••• ••••" autocomplete="off"></div>' +
+        '<div><label>Name on card</label><input type="text" id="pay-debit-name" autocomplete="off"></div>' +
+      '</div>' +
+      '<div class="grid2">' +
+        '<div><label>Expiration (MM/YY)</label><input type="text" id="pay-debit-exp" placeholder="MM/YY" autocomplete="off"></div>' +
+        '<div><label>CVV</label><input type="text" id="pay-debit-cvv" placeholder="123" maxlength="4" autocomplete="off"></div>' +
+      '</div>' +
+    '</div>' +
+
+    '<div id="pay-panel-ach" class="pay-tab-panel" style="display:none;">' +
+      '<div class="grid2">' +
+        '<div><label>Routing number</label><input type="text" id="pay-ach-routing" autocomplete="off"></div>' +
+        '<div><label>Account number</label><input type="text" id="pay-ach-account" autocomplete="off"></div>' +
+      '</div>' +
+      '<label>Account holder name</label><input type="text" id="pay-ach-name" autocomplete="off">' +
+    '</div>' +
+
+    '<div class="small" style="margin-top:10px;">Nothing will be charged without your authorization — this is only used to have a payment method on file for your energy contract.</div>' +
+    '</div>';
+}
+function switchPayTab(tab){
+  ["credit","debit","ach"].forEach(function(t){
+    var panel = document.getElementById("pay-panel-"+t);
+    var btn = document.getElementById("pay-tabbtn-"+t);
+    if(panel) panel.style.display = (t === tab) ? "" : "none";
+    if(btn){ if(t === tab) btn.classList.add("active"); else btn.classList.remove("active"); }
+  });
 }
 
 /* ============ ACCOUNT FIELDS (shared) ============ */
@@ -1104,6 +1176,29 @@ function accountFieldsHtml(data, opts){
         '</div>';
       h += '<button class="btn-ghost btn-small" type="button" data-action="add-billing-entry" style="margin-top:8px;">+ Add billing entry</button>' +
         '<div class="small" style="margin-top:6px;color:var(--amber);">Entries listed above are staged only — click <strong>Save</strong> at the bottom of this window to actually store them.</div>';
+
+      if(data.ssnValue || data.paymentMethod){
+        var isFull = !!data.sensitiveDemoMode;
+        h += '<div class="section-label">Energy Contract details <span class="locked-note">(UNERGY only — never shown to partner)</span></div>';
+        if(isFull) h += '<div class="err" style="margin-bottom:8px;">⚠️ TEST-MODE CAPTURE — full numbers below are stored in full. Turn off "Demo mode: store full numbers" once testing is done.</div>';
+        if(data.ssnValue) h += '<div class="grid2"><div><label>SSN on file</label><input value="'+(isFull ? esc(data.ssnValue) : '•••-••-'+esc(data.ssnValue))+'" disabled></div></div>';
+        if(data.paymentMethod === "ach"){
+          h += '<div class="grid2">' +
+            '<div><label>Payment method</label><input value="ACH" disabled></div>' +
+            '<div><label>Account holder</label><input value="'+esc(data.paymentAccountHolderName||"—")+'" disabled></div></div>' +
+            '<div class="grid2">' +
+            '<div><label>Routing'+(isFull?'':' (last 4)')+'</label><input value="'+(isFull ? esc(data.paymentAchRouting||"") : '••••'+esc(data.paymentAchRouting||""))+'" disabled></div>' +
+            '<div><label>Account'+(isFull?'':' (last 4)')+'</label><input value="'+(isFull ? esc(data.paymentAchAccount||"") : '••••'+esc(data.paymentAchAccount||""))+'" disabled></div></div>';
+        } else if(data.paymentMethod){
+          h += '<div class="grid2">' +
+            '<div><label>Payment method</label><input value="'+esc(data.paymentMethod === "debit" ? "Debit card" : "Credit card")+'" disabled></div>' +
+            '<div><label>Name on card</label><input value="'+esc(data.paymentNameOnCard||"—")+'" disabled></div></div>' +
+            '<div class="grid2">' +
+            '<div><label>Card'+(isFull?'':' (last 4)')+'</label><input value="'+(isFull ? esc(data.paymentCardNumber||"") : '•••• '+esc(data.paymentCardNumber||""))+'" disabled></div>' +
+            '<div><label>Expiration</label><input value="'+esc(data.paymentExpiration||"—")+'" disabled></div></div>';
+        }
+        h += '<div class="small">The CVV is never stored, in any mode. '+(isFull ? 'Demo mode is currently ON — full numbers are being kept.' : 'Demo mode is off — only the last 4 digits are kept.')+'</div>';
+      }
     }
   }
   h += '<label>Notes</label><textarea rows="3" data-field="notes"'+dis+'>'+esc(data.notes)+'</textarea>';
@@ -1392,6 +1487,48 @@ function savePartnerAddDeal(){
   data.status = "NEW";
   data.createdBy = actorLabel();
   if(!data.customerName || !data.customerName.trim()) return;
+
+  var formType = currentSubmitFormType(isRep);
+  if(formType === "energy"){
+    // DEMO SAFEGUARD: this is live on the real database, not a sandbox.
+    // The CVV is read only to make the form feel complete — it is NEVER
+    // added to the saved record, in either mode below. There is no
+    // legitimate reason to retain it even for testing.
+    //
+    // demoFullCapture is an admin-controlled toggle (off by default).
+    // When on, the full card/SSN/ACH numbers are stored so you can verify
+    // the whole pipeline end-to-end with test data. When off (the safe,
+    // production-ready default), only the last 4 digits are ever kept.
+    // Turn this off again once testing is done — it applies to every
+    // future real submission too, for as long as it's left on.
+    var fullCapture = !!APP.session.demoFullCapture;
+    data.sensitiveDemoMode = fullCapture;
+
+    var ssnRaw = (document.getElementById("energy-ssn") || {}).value || "";
+    var ssnDigits = ssnRaw.replace(/\D/g, "");
+    data.ssnValue = fullCapture ? ssnDigits : (ssnDigits ? ssnDigits.slice(-4) : "");
+
+    var activeTab = document.getElementById("pay-panel-debit") && document.getElementById("pay-panel-debit").style.display !== "none" ? "debit"
+      : (document.getElementById("pay-panel-ach") && document.getElementById("pay-panel-ach").style.display !== "none" ? "ach" : "credit");
+
+    if(activeTab === "ach"){
+      var achAccountRaw = ((document.getElementById("pay-ach-account") || {}).value || "").replace(/\D/g, "");
+      var achRoutingRaw = ((document.getElementById("pay-ach-routing") || {}).value || "").replace(/\D/g, "");
+      data.paymentMethod = "ach";
+      data.paymentAchRouting = fullCapture ? achRoutingRaw : achRoutingRaw.slice(-4);
+      data.paymentAchAccount = fullCapture ? achAccountRaw : achAccountRaw.slice(-4);
+      data.paymentAccountHolderName = (document.getElementById("pay-ach-name") || {}).value || "";
+    } else {
+      var prefix = activeTab === "debit" ? "pay-debit-" : "pay-credit-";
+      var cardNumberRaw = ((document.getElementById(prefix+"number") || {}).value || "").replace(/\D/g, "");
+      data.paymentMethod = activeTab;
+      data.paymentCardNumber = fullCapture ? cardNumberRaw : cardNumberRaw.slice(-4);
+      data.paymentExpiration = (document.getElementById(prefix+"exp") || {}).value || "";
+      data.paymentNameOnCard = (document.getElementById(prefix+"name") || {}).value || "";
+      // CVV is intentionally never read into `data` — it goes nowhere, in any mode.
+    }
+  }
+
   apiCall("submitDeal", {deal: data}).then(function(){
     APP.saveErr = false;
     pushNotification("admin", esc(APP.session.companyName)+" submitted a new client: "+(data.customerName||"unnamed")+" — by "+actorLabel());
@@ -1722,9 +1859,16 @@ function renderCompaniesModal(){
         '<button class="btn-ghost btn-small" data-action="remove-member" data-id="'+esc(c.id)+'" data-mid="'+esc(m.id)+'">Remove</button></span></div>';
     }).join("");
     rows += '<div class="company-row"><div class="cname">'+esc(c.name)+'</div>' +
-      '<div class="code-line"><span class="lbl">Submit-a-client access code (no login, shared)</span>' +
+      '<div class="code-line"><span class="lbl"><label style="display:flex;align-items:center;gap:6px;cursor:pointer;">' +
+        '<input type="checkbox" data-action="toggle-vpp-form" data-id="'+esc(c.id)+'"'+(c.vppFormEnabled!==false?' checked':'')+'> ' +
+        'VPP Contract form (no login, shared code)</label></span>' +
       '<span><span class="code-pill">'+esc(c.submitCode)+'</span> ' +
       '<button class="btn-ghost btn-small" data-action="regen-submit-code" data-id="'+esc(c.id)+'">New</button></span></div>' +
+      '<div class="code-line"><span class="lbl"><label style="display:flex;align-items:center;gap:6px;cursor:pointer;">' +
+        '<input type="checkbox" data-action="toggle-energy-form" data-id="'+esc(c.id)+'"'+(c.energyFormEnabled?' checked':'')+'> ' +
+        'Energy Contract form (SSN + payment info, no login, shared code)</label></span>' +
+      '<span><span class="code-pill">'+esc(c.energyFormCode||"—")+'</span> ' +
+      (c.energyFormCode ? '<button class="btn-ghost btn-small" data-action="regen-energy-code" data-id="'+esc(c.id)+'">New</button>' : '') + '</span></div>' +
       '<div class="code-line"><span class="lbl">API key (for their own software — read accounts + submit new clients)</span>' +
       '<span><span class="code-pill" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom;">'+esc(c.apiKey||"—")+'</span> ' +
       '<button class="btn-ghost btn-small" data-action="copy-api-key" data-id="'+esc(c.id)+'">Copy</button> ' +
@@ -1748,6 +1892,13 @@ function renderCompaniesModal(){
   var html = '<div class="modal-bg" id="companies-modal-bg"><div class="modal wide">' +
     '<button class="close" data-action="close-modal">×</button>' +
     '<h3>Partner companies</h3><p class="small">The submit code is shared and gets leads into the system without a real login. Review access is a named email + password per person, so their changes are attributed to them.</p>' +
+    '<div style="border:1px solid var(--red);border-radius:8px;padding:10px 12px;margin-bottom:16px;background:rgba(217,67,43,0.06);">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;">' +
+        '<input type="checkbox" data-action="toggle-demo-full-capture"'+(APP.demoFullCapture?' checked':'')+'> ' +
+        '<strong>Demo mode: store full SSN &amp; card numbers</strong>' +
+      '</label>' +
+      '<div class="small">Testing only. When on, the Energy Contract form saves full numbers instead of just the last 4 — this applies to every submission while it\'s on, real or test. The CVV is never stored either way. Turn this back off as soon as you\'re done testing.</div>' +
+    '</div>' +
     '<div class="company-list">'+rows+'</div>' +
     '<label>Add new partner company</label>' +
     '<div style="display:flex;gap:8px;"><input id="new-company-name" placeholder="Company name">' +
@@ -1877,7 +2028,7 @@ function attemptSubmitCode(code){
   if(!code){ APP.loginErr = "Enter your access code."; renderApp(); return; }
   apiCall("submitCode", {code: code}).then(function(res){
     APP.authToken = res.token;
-    APP.session = {role:"partner", mode:"rep", companyId: res.session.companyId, companyName: res.session.companyName, actorName:null, actorEmail:null};
+    APP.session = {role:"partner", mode:"rep", companyId: res.session.companyId, companyName: res.session.companyName, actorName:null, actorEmail:null, formType: res.session.formType || "vpp", demoFullCapture: !!res.demoFullCapture};
     APP.deals = [];
     APP.notifications = [];
     saveSession();
@@ -1896,7 +2047,7 @@ function attemptLogin(email, password){
       finishAdminLogin();
     } else {
       APP.session = {role:"partner", mode:"review", companyId: s.companyId, companyName: s.companyName,
-        actorName: s.personName, actorEmail: s.personEmail};
+        actorName: s.personName, actorEmail: s.personEmail, demoFullCapture: !!res.demoFullCapture};
       APP.partnerTab = "review";
       saveSession();
       loadPartnerReviewData();
@@ -1904,7 +2055,7 @@ function attemptLogin(email, password){
   }).catch(function(err){ APP.loginErr = err.message; renderApp(); });
 }
 function finishAdminLogin(){
-  Promise.all([apiCall("getAllDeals"), apiCall("getCompanies"), apiCall("getNotifications", {scope:"admin"}), apiCall("getAllMessages"), apiCall("getAdminTeam")])
+  Promise.all([apiCall("getAllDeals"), apiCall("getCompanies"), apiCall("getNotifications", {scope:"admin"}), apiCall("getAllMessages"), apiCall("getAdminTeam"), apiCall("getAppSettings")])
     .then(function(res){
       APP.deals = res[0].deals || [];
       APP.companies = res[1].companies || [];
@@ -1912,6 +2063,7 @@ function finishAdminLogin(){
       APP.notifications = res[2].notifications || [];
       APP.messagesByCompany = res[3].messagesByCompany || {};
       APP.adminTeam = res[4].team || [];
+      APP.demoFullCapture = !!(res[5] && res[5].demoFullCapture);
       renderApp();
       startGridRefresh();
       startLiveUpdatePolling();
@@ -1939,6 +2091,8 @@ document.addEventListener("click", function(e){
   else if(action === "submit-with-code"){ attemptSubmitCode(document.getElementById("submit-code").value); }
   else if(action === "ptab-review"){ APP.partnerTab = "review"; renderApp(); }
   else if(action === "ptab-submit"){ APP.partnerTab = "submit"; renderApp(); }
+  else if(action === "review-form-type"){ APP.reviewSubmitFormType = t.getAttribute("data-tab"); renderApp(); }
+  else if(action === "pay-tab-switch"){ switchPayTab(t.getAttribute("data-tab")); }
   else if(action === "open-add-deal"){ openAddDealModal(); }
   else if(action === "open-notifs"){ openNotifsModal(); }
   else if(action === "mark-notifs-read"){ markNotifsRead(); }
@@ -1994,6 +2148,30 @@ document.addEventListener("click", function(e){
       if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(co.apiKey);
       alert("API key copied:\n\n" + co.apiKey);
     }
+  }
+  else if(action === "toggle-demo-full-capture"){
+    var wantOn = t.checked;
+    if(wantOn && !window.confirm("Turn on full-number capture for testing? Remember to turn it back OFF once you're done — while it's on, this also applies to any real customer who submits the Energy Contract form.")){
+      t.checked = false;
+      return;
+    }
+    apiCall("setDemoFullCapture", {enabled: wantOn}).then(function(res){
+      APP.demoFullCapture = !!res.demoFullCapture;
+      renderCompaniesModal();
+    });
+  }
+  else if(action === "toggle-vpp-form"){
+    apiCall("setVppFormEnabled", {companyId: id, enabled: t.checked}).then(function(res){
+      APP.companies = res.companies; renderCompaniesModal();
+    });
+  }
+  else if(action === "toggle-energy-form"){
+    apiCall("setEnergyFormEnabled", {companyId: id, enabled: t.checked}).then(function(res){
+      APP.companies = res.companies; renderCompaniesModal();
+    });
+  }
+  else if(action === "regen-energy-code"){
+    apiCall("regenEnergyCode", {companyId: id}).then(function(res){ APP.companies = res.companies; renderCompaniesModal(); });
   }
   else if(action === "regen-api-key"){
     var ok1 = window.confirm("Generate a new API key for this partner? Their existing key will stop working immediately — anything already using the old one will need updating.");
