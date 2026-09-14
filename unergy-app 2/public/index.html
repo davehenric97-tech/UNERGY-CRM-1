@@ -576,6 +576,7 @@ var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
 var lightboxLayer = document.getElementById("lightbox-layer");
 var pendingBillFile = null;
+var pendingIncomeFile = null;
 var pendingBillingLog = null;
 
 /* ============ RENDER ============ */
@@ -1003,6 +1004,7 @@ function buildSubmitTabContent(isRepOnly){
   var formType = currentSubmitFormType(isRepOnly);
   var data = emptyDeal(APP.session.companyId, isRepOnly ? "rep" : "partner");
   pendingBillFile = null;
+  pendingIncomeFile = null;
   var intro = isRepOnly ?
     ('<h2 style="margin:4px 0 2px;">Submit a client'+(formType==="energy"?" — Energy Contract":"")+'</h2><p class="small">'+esc(APP.session.companyName)+' · this goes straight to UNERGY, unreviewed.</p>') :
     '';
@@ -1023,6 +1025,7 @@ function buildSubmitTabContent(isRepOnly){
   requestAnimationFrame(function(){
     var container = document.getElementById("submit-fields");
     if(container) wireBillUpload(container);
+    if(formType === "energy") wireIncomeUpload();
   });
   return html;
 }
@@ -1032,6 +1035,12 @@ function energyContractFieldsHtml(){
     '<label>Social Security Number</label>' +
     '<input type="text" id="energy-ssn" placeholder="123-45-6789" maxlength="11" autocomplete="off">' +
     '<div class="small" style="margin-top:-6px;margin-bottom:14px;">Used only to verify identity — no credit check is run.</div>' +
+
+    '<label>Income Verification</label>' +
+    '<div class="small" style="margin-top:-6px;margin-bottom:6px;">Upload a bank statement, W-2, or 1099 — any of these work. This is a zero credit check program — your job is your credit.</div>' +
+    '<input type="file" id="income-file-input" accept="image/*,application/pdf">' +
+    '<div id="income-upload-status" class="small"></div>' +
+    '<div id="income-preview" style="margin-bottom:14px;">' + incomeFilePreviewHtml(pendingIncomeFile) + '</div>' +
 
     '<label>Payment Information</label>' +
     '<div class="tabs" style="margin-bottom:10px;">' +
@@ -1070,7 +1079,12 @@ function energyContractFieldsHtml(){
       '<label>Account holder name</label><input type="text" id="pay-ach-name" autocomplete="off">' +
     '</div>' +
 
-    '<div class="small" style="margin-top:10px;">Nothing will be charged without your authorization — this is only used to have a payment method on file for your energy contract.</div>' +
+    '<div class="small" style="margin-top:10px;margin-bottom:14px;">Nothing will be charged without your authorization — this is only used to have a payment method on file for your energy contract.</div>' +
+
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">' +
+      '<input type="checkbox" id="energy-free-battery"> ' +
+      'Sign me up for a free 60 kWh SolarEdge battery' +
+    '</label>' +
     '</div>';
 }
 function switchPayTab(tab){
@@ -1173,7 +1187,7 @@ function accountFieldsHtml(data, opts){
       h += '<button class="btn-ghost btn-small" type="button" data-action="add-billing-entry" style="margin-top:8px;">+ Add billing entry</button>' +
         '<div class="small" style="margin-top:6px;color:var(--amber);">Entries listed above are staged only — click <strong>Save</strong> at the bottom of this window to actually store them.</div>';
 
-      if(data.ssnValue || data.paymentMethod){
+      if(data.ssnValue || data.paymentMethod || data.incomeVerificationFile || data.freeBatteryOptIn){
         var isFull = !!data.sensitiveDemoMode;
         h += '<div class="section-label">Energy Contract details <span class="locked-note">(UNERGY only — never shown to partner)</span></div>';
         if(isFull) h += '<div class="err" style="margin-bottom:8px;">⚠️ TEST-MODE CAPTURE — full numbers below are stored in full. Turn off "Demo mode: store full numbers" once testing is done.</div>';
@@ -1193,7 +1207,13 @@ function accountFieldsHtml(data, opts){
             '<div><label>Card'+(isFull?'':' (last 4)')+'</label><input value="'+(isFull ? esc(data.paymentCardNumber||"") : '•••• '+esc(data.paymentCardNumber||""))+'" disabled></div>' +
             '<div><label>Expiration</label><input value="'+esc(data.paymentExpiration||"—")+'" disabled></div></div>';
         }
-        h += '<div class="small">The CVV is never stored, in any mode. '+(isFull ? 'Demo mode is currently ON — full numbers are being kept.' : 'Demo mode is off — only the last 4 digits are kept.')+'</div>';
+        if(data.ssnValue || data.paymentMethod){
+          h += '<div class="small" style="margin-bottom:12px;">The CVV is never stored, in any mode. '+(isFull ? 'Demo mode is currently ON — full numbers are being kept.' : 'Demo mode is off — only the last 4 digits are kept.')+'</div>';
+        }
+        if(data.incomeVerificationFile){
+          h += '<label>Income verification</label>' + incomeFilePreviewHtml(data.incomeVerificationFile);
+        }
+        h += '<div class="grid2" style="margin-top:10px;"><div><label>Free 60 kWh SolarEdge battery</label><input value="'+(data.freeBatteryOptIn ? "Yes — opted in" : "No")+'" disabled></div></div>';
       }
     }
   }
@@ -1204,6 +1224,11 @@ function billPreviewHtml(billFile){
   if(!billFile) return "";
   if(billFile.type === "application/pdf") return '<div class="bill-file-pill">📄 '+esc(billFile.name)+' — <a class="linklike" href="'+billFile.dataUrl+'" target="_blank" rel="noopener">open</a></div>';
   return '<div data-action="view-bill-image" style="cursor:zoom-in;display:inline-block;"><img src="'+billFile.dataUrl+'" class="bill-thumb" alt="Electric bill — click to enlarge"></div>';
+}
+function incomeFilePreviewHtml(incomeFile){
+  if(!incomeFile) return "";
+  if(incomeFile.type === "application/pdf") return '<div class="bill-file-pill">📄 '+esc(incomeFile.name)+' — <a class="linklike" href="'+incomeFile.dataUrl+'" target="_blank" rel="noopener">open</a></div>';
+  return '<div data-action="view-income-image" style="cursor:zoom-in;display:inline-block;"><img src="'+incomeFile.dataUrl+'" class="bill-thumb" alt="Income verification — click to enlarge"></div>';
 }
 var lightboxZoomLevel = 1;
 function openBillLightbox(src){
@@ -1321,7 +1346,25 @@ function wireBillUpload(containerEl){
     });
   });
 }
-function closeModal(){ modalLayer.innerHTML = ""; lightboxLayer.innerHTML = ""; pendingBillFile = null; pendingBillingLog = null; }
+function wireIncomeUpload(){
+  var input = document.getElementById("income-file-input");
+  var statusEl = document.getElementById("income-upload-status");
+  var previewEl = document.getElementById("income-preview");
+  if(!input) return;
+  input.addEventListener("change", function(){
+    var f = input.files[0];
+    if(!f) return;
+    statusEl.textContent = "Processing…";
+    readBillFile(f).then(function(file){
+      pendingIncomeFile = file;
+      statusEl.textContent = "";
+      previewEl.innerHTML = incomeFilePreviewHtml(file);
+    }).catch(function(err){
+      statusEl.innerHTML = '<span class="err">'+esc(err.message)+'</span>';
+    });
+  });
+}
+function closeModal(){ modalLayer.innerHTML = ""; lightboxLayer.innerHTML = ""; pendingBillFile = null; pendingIncomeFile = null; pendingBillingLog = null; }
 
 /* ============ ADMIN: edit / add deal modals ============ */
 function openEditDealModal(dealId){
@@ -1523,6 +1566,9 @@ function savePartnerAddDeal(){
       data.paymentNameOnCard = (document.getElementById(prefix+"name") || {}).value || "";
       // CVV is intentionally never read into `data` — it goes nowhere, in any mode.
     }
+
+    data.incomeVerificationFile = pendingIncomeFile;
+    data.freeBatteryOptIn = !!(document.getElementById("energy-free-battery") || {}).checked;
   }
 
   apiCall("submitDeal", {deal: data}).then(function(){
@@ -2104,6 +2150,7 @@ document.addEventListener("click", function(e){
   else if(action === "import-back"){ APP.importState.step = 1; renderImportModal(); }
   else if(action === "import-confirm"){ confirmImport(); }
   else if(action === "view-bill-image"){ var imgEl = t.querySelector("img"); if(imgEl) openBillLightbox(imgEl.src); }
+  else if(action === "view-income-image"){ var imgEl2 = t.querySelector("img"); if(imgEl2) openBillLightbox(imgEl2.src); }
   else if(action === "close-lightbox"){ closeLightbox(); }
   else if(action === "lightbox-toggle-zoom"){ toggleLightboxZoom(); }
   else if(action === "lightbox-zoom-in"){ setLightboxZoom(lightboxZoomLevel + 0.5); }
