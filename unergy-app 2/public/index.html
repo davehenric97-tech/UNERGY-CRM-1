@@ -286,14 +286,19 @@ function readBillFile(file){
     reader.onload = function(){
       var img = new Image();
       img.onload = function(){
-        var maxW = 1100;
+        // Higher resolution and quality than before — the old settings
+        // (1100px wide, 72% JPEG quality) were fine for a simple bill
+        // total, but blur out the smaller, denser text on things like
+        // bank statements and W-2s. This keeps files small enough to
+        // store while actually staying legible when zoomed in.
+        var maxW = 1800;
         var scale = Math.min(1, maxW / img.width);
         var canvas = document.createElement("canvas");
         canvas.width = img.width * scale;
         canvas.height = img.height * scale;
         var ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve({name:file.name, type:"image/jpeg", dataUrl: canvas.toDataURL("image/jpeg", 0.72)});
+        resolve({name:file.name, type:"image/jpeg", dataUrl: canvas.toDataURL("image/jpeg", 0.88)});
       };
       img.onerror = function(){ reject(new Error("Couldn't read that image.")); };
       img.src = reader.result;
@@ -634,7 +639,9 @@ function buildTopbar(){
 }
 
 function buildLoginGate(){
-  var heroCopy = '<div class="hero-copy"><h1 class="hero-title">Powering Texas.<br>Empowering You.</h1></div>';
+  var heroCopy = '<div class="hero-copy"><h1 class="hero-title">Powering Texas.<br>Empowering You.</h1>' +
+    '<a href="https://www.unergypowercompany.com/" target="_blank" rel="noopener" class="subtle-link" style="display:inline-block;margin-top:10px;">Visit unergypowercompany.com</a>' +
+    '</div>';
   if(APP.showAdminField){
     var body = '<h2>Internal sign-in</h2><p class="hint">UNERGY team only.</p>' +
       '<label>Email</label><input id="login-email" type="email" placeholder="you@unergypowercompany.com">' +
