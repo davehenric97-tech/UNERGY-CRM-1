@@ -1227,14 +1227,19 @@ function accountFieldsHtml(data, opts){
   h += '<label>Notes</label><textarea rows="3" data-field="notes"'+dis+'>'+esc(data.notes)+'</textarea>';
   return h;
 }
+function pdfPreviewHtml(file, label){
+  return '<div class="bill-file-pill" style="margin-bottom:6px;">📄 '+esc(file.name)+
+    ' — <a class="linklike" href="'+file.dataUrl+'" target="_blank" rel="noopener">open in new tab</a></div>' +
+    '<iframe src="'+file.dataUrl+'" title="'+esc(label)+'" style="width:100%;max-width:560px;height:420px;border:1px solid var(--line);border-radius:8px;display:block;"></iframe>';
+}
 function billPreviewHtml(billFile){
   if(!billFile) return "";
-  if(billFile.type === "application/pdf") return '<div class="bill-file-pill">📄 '+esc(billFile.name)+' — <a class="linklike" href="'+billFile.dataUrl+'" target="_blank" rel="noopener">open</a></div>';
+  if(billFile.type === "application/pdf") return pdfPreviewHtml(billFile, "Electric bill");
   return '<div data-action="view-bill-image" style="cursor:zoom-in;display:inline-block;"><img src="'+billFile.dataUrl+'" class="bill-thumb" alt="Electric bill — click to enlarge"></div>';
 }
 function incomeFilePreviewHtml(incomeFile){
   if(!incomeFile) return "";
-  if(incomeFile.type === "application/pdf") return '<div class="bill-file-pill">📄 '+esc(incomeFile.name)+' — <a class="linklike" href="'+incomeFile.dataUrl+'" target="_blank" rel="noopener">open</a></div>';
+  if(incomeFile.type === "application/pdf") return pdfPreviewHtml(incomeFile, "Income verification");
   return '<div data-action="view-income-image" style="cursor:zoom-in;display:inline-block;"><img src="'+incomeFile.dataUrl+'" class="bill-thumb" alt="Income verification — click to enlarge"></div>';
 }
 var lightboxZoomLevel = 1;
