@@ -286,6 +286,44 @@ async function getDemoFullCapture() {
   return !!(s && s.demoFullCapture);
 }
 
+// ---------- activity log (logins, logouts, codes used, and key actions) ----------
+async function logActivity(type, actorLabel, detail) {
+  try {
+    const log = (await getJSON("activity-log")) || [];
+    log.unshift({ id: "log_" + crypto.randomBytes(4).toString("hex"), type, actor: actorLabel || "unknown", detail: detail || "", at: new Date().toISOString() });
+    await setJSON("activity-log", log.slice(0, 1000));
+  } catch (e) { /* logging must never block the actual action from completing */ }
+}
+
+// ---------- full-data backups (worst-case restore, not just per-account undo) ----------
+async function snapshotAllData() {
+  const keys = await listKeys("");
+  const data = {};
+  for (const k of keys) {
+    if (k.startsWith("backup-") || k === "backup-index") continue; // never back up the backups themselves
+    data[k] = await getJSON(k);
+  }
+  return data;
+}
+async function saveBackupEntry(id, data, kind, createdBy) {
+  await setJSON(id, data);
+  const index = (await getJSON("backup-index")) || [];
+  index.unshift({ id, createdAt: new Date().toISOString(), keyCount: Object.keys(data).length, kind, createdBy: createdBy || "system" });
+  const kept = index.slice(0, 14);
+  for (const old of index.slice(14)) { await del(old.id); }
+  await setJSON("backup-index", kept);
+  return kept[0];
+}
+async function maybeAutoBackupToday(actorLabel) {
+  try {
+    const index = (await getJSON("backup-index")) || [];
+    const todayId = "backup-" + new Date().toISOString().slice(0, 10);
+    if (index.find((b) => b.id === todayId)) return;
+    const data = await snapshotAllData();
+    await saveBackupEntry(todayId, data, "auto", actorLabel);
+  } catch (e) { /* an auto-backup hiccup must never block the actual action */ }
+}
+
 function stripPeopleSecrets(companies) {
   return companies.map((c) => ({
     id: c.id, name: c.name, submitCode: c.submitCode, apiKey: c.apiKey || null, notifyEmail: c.notifyEmail || "",
@@ -392,6 +430,14 @@ exports.handler = async (event) => {
       const e = new Error("This API key can only be used with apiListAccounts and apiSubmitAccount"); e.status = 403; throw e;
     }
 
+    // A same-day snapshot is taken automatically the first time any of these
+    // higher-risk actions run — cheap insurance against exactly the kind of
+    // "wait, where did that go" moment a backup exists for.
+    const AUTO_BACKUP_TRIGGERS = new Set(["deleteDeal", "removeCompany", "purgeDealForever", "removePerson", "removeAdminMember", "restoreBackup"]);
+    if (AUTO_BACKUP_TRIGGERS.has(action) && session) {
+      await maybeAutoBackupToday(session.personName || session.personEmail || session.companyName);
+    }
+
     switch (action) {
       case "login": {
         const email = normEmail(p.email);
@@ -403,7 +449,13 @@ exports.handler = async (event) => {
           ? { role: "admin", personName: entry.personName, personEmail: entry.personEmail }
           : { role: "partner-review", companyId: entry.companyId, companyName: entry.companyName,
               personName: entry.personName, personEmail: entry.personEmail };
+        await logActivity("login", entry.personName || email, entry.type === "admin" ? "Signed in as UNERGY admin" : "Signed in as review access for " + entry.companyName);
         return ok(cors, { token: signToken(sessionPayload), session: sessionPayload, demoFullCapture: await getDemoFullCapture() });
+      }
+
+      case "logout": {
+        if (session) await logActivity("logout", session.personName || session.personEmail || session.companyName || "unknown", "Signed out");
+        return ok(cors, { done: true });
       }
 
       case "submitCode": {
@@ -414,6 +466,7 @@ exports.handler = async (event) => {
           const co = companies.find((c) => c.id === vppEntry.companyId);
           if (!co || co.vppFormEnabled === false) { const e = new Error("This form isn't currently accepting submissions"); e.status = 403; throw e; }
           const sessionPayload = { role: "partner-rep", companyId: vppEntry.companyId, companyName: vppEntry.companyName, formType: "vpp" };
+          await logActivity("code-login", vppEntry.companyName, "Used VPP Contract submit code " + code);
           return ok(cors, { token: signToken(sessionPayload), session: sessionPayload, demoFullCapture: await getDemoFullCapture() });
         }
         const energyEntry = await getJSON("energycode-" + code);
@@ -422,6 +475,7 @@ exports.handler = async (event) => {
           const co = companies.find((c) => c.id === energyEntry.companyId);
           if (!co || !co.energyFormEnabled) { const e = new Error("This form isn't currently accepting submissions"); e.status = 403; throw e; }
           const sessionPayload = { role: "partner-rep", companyId: energyEntry.companyId, companyName: energyEntry.companyName, formType: "energy" };
+          await logActivity("code-login", energyEntry.companyName, "Used Energy Contract code " + code);
           return ok(cors, { token: signToken(sessionPayload), session: sessionPayload, demoFullCapture: await getDemoFullCapture() });
         }
         const e = new Error("Access code not recognized"); e.status = 401; throw e;
@@ -471,6 +525,7 @@ exports.handler = async (event) => {
         await setJSON("submitcode-" + submitCode, { companyId: co.id, companyName: co.name });
         await setJSON("apikey-" + apiKey, { companyId: co.id, companyName: co.name });
         await setJSON("deals-" + co.id, []);
+        await logActivity("action", session.personName || session.personEmail, "Added partner: " + p.name);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -484,6 +539,7 @@ exports.handler = async (event) => {
         co.apiKey = newKey;
         await setJSON("companies", companies);
         await setJSON("apikey-" + newKey, { companyId: co.id, companyName: co.name });
+        await logActivity("action", session.personName || session.personEmail, "Regenerated API key for " + co.name);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -500,6 +556,7 @@ exports.handler = async (event) => {
         }
         const next = companies.filter((c) => c.id !== p.companyId);
         await setJSON("companies", next);
+        await logActivity("action", session.personName || session.personEmail, "Removed partner: " + (co ? co.name : p.companyId));
         return ok(cors, { companies: stripPeopleSecrets(next) });
       }
 
@@ -513,6 +570,7 @@ exports.handler = async (event) => {
         co.submitCode = newCode;
         await setJSON("companies", companies);
         await setJSON("submitcode-" + newCode, { companyId: co.id, companyName: co.name });
+        await logActivity("action", session.personName || session.personEmail, "Regenerated VPP submit code for " + co.name);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -551,6 +609,7 @@ exports.handler = async (event) => {
         co.energyFormCode = newCode;
         await setJSON("companies", companies);
         await setJSON("energycode-" + newCode, { companyId: co.id, companyName: co.name });
+        await logActivity("action", session.personName || session.personEmail, "Regenerated Energy Contract code for " + co.name);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -562,7 +621,49 @@ exports.handler = async (event) => {
       case "setDemoFullCapture": {
         requireAdmin(session);
         await setJSON("app-settings", { demoFullCapture: !!p.enabled });
+        await logActivity("action", session.personName || session.personEmail, "Set demo full-capture mode to " + (p.enabled ? "ON" : "OFF"));
         return ok(cors, { demoFullCapture: !!p.enabled });
+      }
+
+      case "getActivityLog": {
+        requireAdmin(session);
+        const log = (await getJSON("activity-log")) || [];
+        return ok(cors, { log: log.slice(0, 250) });
+      }
+
+      case "listBackups": {
+        requireAdmin(session);
+        const index = (await getJSON("backup-index")) || [];
+        return ok(cors, { backups: index });
+      }
+
+      case "createBackup": {
+        requireAdmin(session);
+        const data = await snapshotAllData();
+        const id = "backup-" + Date.now();
+        const entry = await saveBackupEntry(id, data, "manual", session.personName || session.personEmail);
+        await logActivity("action", session.personName || session.personEmail, "Created a manual backup (" + entry.keyCount + " records)");
+        return ok(cors, { backup: entry });
+      }
+
+      case "restoreBackup": {
+        requireAdmin(session);
+        const index = (await getJSON("backup-index")) || [];
+        const entry = index.find((b) => b.id === p.backupId);
+        if (!entry) { const e = new Error("Backup not found"); e.status = 404; throw e; }
+        const data = await getJSON(p.backupId);
+        if (!data) { const e = new Error("Backup data is missing"); e.status = 404; throw e; }
+        // Safety net: snapshot the CURRENT state first, so restoring an old
+        // backup is itself always undoable — a bad restore is just another
+        // backup away from being fixed.
+        const preData = await snapshotAllData();
+        await saveBackupEntry("backup-" + Date.now() + "-prerestore", preData, "pre-restore-safety", session.personName || session.personEmail);
+        const keys = Object.keys(data);
+        for (const key of keys) {
+          await setJSON(key, data[key]);
+        }
+        await logActivity("action", session.personName || session.personEmail, "Restored backup from " + entry.createdAt + " (" + keys.length + " records)");
+        return ok(cors, { done: true, restoredKeys: keys.length });
       }
 
       case "setNotifyEmail": {
@@ -594,6 +695,7 @@ exports.handler = async (event) => {
           type: "partner", companyId: co.id, companyName: co.name, role: "review",
           personId: person.id, personName: p.name, personEmail: email, passwordHash: hash, salt,
         });
+        await logActivity("action", session.personName || session.personEmail, "Added " + p.name + " (" + email + ") to " + co.name);
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -601,12 +703,14 @@ exports.handler = async (event) => {
         requireAdmin(session);
         const companies = (await getJSON("companies")) || [];
         const co = companies.find((c) => c.id === p.companyId);
+        var removedPersonLabel = "";
         if (co) {
           const person = (co.people || []).find((m) => m.id === p.personId);
-          if (person) await del("login-" + normEmail(person.email));
+          if (person) { await del("login-" + normEmail(person.email)); removedPersonLabel = person.name + " (" + person.email + ")"; }
           co.people = (co.people || []).filter((m) => m.id !== p.personId);
         }
         await setJSON("companies", companies);
+        await logActivity("action", session.personName || session.personEmail, "Removed " + (removedPersonLabel || "a person") + " from " + (co ? co.name : p.companyId));
         return ok(cors, { companies: stripPeopleSecrets(companies) });
       }
 
@@ -650,6 +754,7 @@ exports.handler = async (event) => {
         await setJSON("login-" + email, {
           type: "admin", personId: member.id, personName: p.name, personEmail: email, passwordHash: hash, salt,
         });
+        await logActivity("action", session.personName || session.personEmail, "Added UNERGY team member: " + p.name + " (" + email + ")");
         return ok(cors, { team: team.map((m) => ({ id: m.id, name: m.name, email: m.email })) });
       }
 
@@ -660,6 +765,7 @@ exports.handler = async (event) => {
         if (member) await del("login-" + normEmail(member.email));
         const next = team.filter((m) => m.id !== p.memberId);
         await setJSON("admin-team", next);
+        await logActivity("action", session.personName || session.personEmail, "Removed UNERGY team member: " + (member ? member.name : p.memberId));
         return ok(cors, { team: next.map((m) => ({ id: m.id, name: m.name, email: m.email })) });
       }
 
@@ -706,6 +812,65 @@ exports.handler = async (event) => {
         return ok(cors, { done: true });
       }
 
+      case "deleteDeal": {
+        requireAdmin(session);
+        const { companyId, dealId } = p;
+        if (!companyId || !dealId) { const e = new Error("Missing companyId or dealId"); e.status = 400; throw e; }
+        const deals = (await getJSON("deals-" + companyId)) || [];
+        const idx = deals.findIndex((d) => d.id === dealId);
+        if (idx === -1) { const e = new Error("Account not found"); e.status = 404; throw e; }
+        const [deal] = deals.splice(idx, 1);
+        await setJSON("deals-" + companyId, deals);
+        // Soft-delete: the record moves to a trash log with who/when, instead
+        // of vanishing outright — so a deletion is always traceable and
+        // reversible, not a silent, unexplained disappearance.
+        const trash = (await getJSON("trash")) || [];
+        trash.unshift({ deal, originalCompanyId: companyId, deletedAt: new Date().toISOString(), deletedBy: session.personName || session.personEmail || "UNERGY Admin" });
+        await setJSON("trash", trash.slice(0, 500));
+        await logActivity("action", session.personName || session.personEmail, "Deleted account: " + (deal.customerName || dealId));
+        return ok(cors, { done: true });
+      }
+
+      case "getTrash": {
+        requireAdmin(session);
+        let trash = (await getJSON("trash")) || [];
+        // Housekeeping: entries older than 90 days quietly age out on read,
+        // rather than needing a separate scheduled job.
+        const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+        const before = trash.length;
+        trash = trash.filter((t) => new Date(t.deletedAt).getTime() > cutoff);
+        if (trash.length !== before) await setJSON("trash", trash);
+        return ok(cors, { trash });
+      }
+
+      case "restoreDeal": {
+        requireAdmin(session);
+        const trash = (await getJSON("trash")) || [];
+        const idx = trash.findIndex((t) => t.deal.id === p.dealId);
+        if (idx === -1) { const e = new Error("Not found in Recently Deleted"); e.status = 404; throw e; }
+        const entry = trash[idx];
+        const companies = (await getJSON("companies")) || [];
+        const co = companies.find((c) => c.id === entry.originalCompanyId);
+        if (!co) { const e = new Error("The partner this belonged to no longer exists, so it can't be restored automatically"); e.status = 409; throw e; }
+        trash.splice(idx, 1);
+        await setJSON("trash", trash);
+        const deals = (await getJSON("deals-" + entry.originalCompanyId)) || [];
+        deals.push(entry.deal);
+        await setJSON("deals-" + entry.originalCompanyId, deals);
+        await logActivity("action", session.personName || session.personEmail, "Restored account: " + (entry.deal.customerName || p.dealId));
+        return ok(cors, { done: true });
+      }
+
+      case "purgeDealForever": {
+        requireAdmin(session);
+        const trash = (await getJSON("trash")) || [];
+        const purged = trash.find((t) => t.deal.id === p.dealId);
+        const next = trash.filter((t) => t.deal.id !== p.dealId);
+        await setJSON("trash", next);
+        await logActivity("action", session.personName || session.personEmail, "Permanently deleted: " + (purged ? (purged.deal.customerName || p.dealId) : p.dealId));
+        return ok(cors, { done: true });
+      }
+
       case "moveDeal": {
         requireAdmin(session);
         const { dealId, fromCompanyId, toCompanyId } = p;
@@ -723,6 +888,7 @@ exports.handler = async (event) => {
         const toDeals = (await getJSON("deals-" + toCompanyId)) || [];
         toDeals.push(deal);
         await setJSON("deals-" + toCompanyId, toDeals);
+        await logActivity("action", session.personName || session.personEmail, "Moved account " + (deal.customerName || dealId) + " between partners");
         return ok(cors, { deal });
       }
 
@@ -735,6 +901,7 @@ exports.handler = async (event) => {
         const companiesForNotify = (await getJSON("companies")) || [];
         const coForNotify = companiesForNotify.find((c) => c.id === session.companyId);
         await notifyNewSubmission(p.deal, session.companyName, coForNotify && coForNotify.notifyEmail).catch(() => {});
+        await logActivity("action", session.companyName, "Submitted new client: " + (p.deal && p.deal.customerName));
         return ok(cors, { done: true });
       }
 
@@ -825,6 +992,7 @@ exports.handler = async (event) => {
         const companiesForNotify2 = (await getJSON("companies")) || [];
         const coForNotify2 = companiesForNotify2.find((c) => c.id === session.companyId);
         await notifyNewSubmission(newAccount, session.companyName, coForNotify2 && coForNotify2.notifyEmail).catch(() => {});
+        await logActivity("action", session.companyName + " (API)", "Submitted new client via API: " + newAccount.customerName);
         return ok(cors, { account: stripDealForApi(newAccount) });
       }
 
