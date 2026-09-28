@@ -575,7 +575,7 @@ function confirmImport(){
 
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
-var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], filterCo:"all", filterStatus:"all", searchQuery:"" };
+var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatus:"all", searchQuery:"" };
 var gridRefreshTimer = null;
 var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
@@ -716,6 +716,9 @@ function buildAdminView(){
     '<button class="btn-ghost btn-small" data-action="open-kpis">KPIs</button>' +
     '<button class="btn-ghost btn-small" data-action="open-import">Import CSV</button>' +
     '<button class="btn-ghost btn-small" data-action="open-notion-sync">Sync from Notion</button>' +
+    '<button class="btn-ghost btn-small" data-action="open-trash">Recently Deleted</button>' +
+    '<button class="btn-ghost btn-small" data-action="open-backups">Backups</button>' +
+    '<button class="btn-ghost btn-small" data-action="open-activity-log">Activity Log</button>' +
     '<button class="btn-teal btn-small" data-action="open-add-deal">+ Add account</button>' +
     '</div></div>';
 
@@ -1405,7 +1408,7 @@ function openEditDealModal(dealId){
      '</label>' +
      moveHtml +
      '<div class="actions"><button class="btn-ghost" data-action="close-modal">Cancel</button>' +
-     '<button class="btn-danger" data-action="delete-deal" data-id="'+esc(deal.id)+'">Delete permanently</button>' +
+     '<button class="btn-danger" data-action="delete-deal" data-id="'+esc(deal.id)+'">Delete</button>' +
      '<button class="btn-primary" style="margin-top:0" data-action="save-edit-deal" data-id="'+esc(deal.id)+'">Save</button></div>');
   var html = '<div class="modal-bg" id="edit-modal-bg"><div class="modal wide">' +
     '<button class="close" data-action="close-modal">×</button>' +
@@ -1457,18 +1460,14 @@ function saveEditDeal(dealId){
 function deleteDealPermanently(dealId){
   var deal = APP.deals.filter(function(d){ return d.id === dealId; })[0];
   if(!deal) return;
-  var ok1 = window.confirm('Permanently delete the account for "'+(deal.customerName||"this client")+'"? This removes it for both your team and the partner, and can\'t be undone.');
+  var ok1 = window.confirm('Delete the account for "'+(deal.customerName||"this client")+'"? It\'ll disappear from both your team and the partner\'s view, but it goes to Recently Deleted first — you can find it and restore it there for 90 days.');
   if(!ok1) return;
-  var companyId = deal.companyId;
-  apiCall("getDeals", {companyId: companyId}).then(function(res){
-    var arr = (res.deals || []).filter(function(d){ return d.id !== dealId; });
-    return apiCall("setDeals", {companyId: companyId, deals: arr});
-  }).then(function(){
+  apiCall("deleteDeal", {companyId: deal.companyId, dealId: dealId}).then(function(){
     APP.deals = APP.deals.filter(function(d){ return d.id !== dealId; });
     closeModal();
     renderApp();
-  }).catch(function(){
-    alert("Couldn't delete that account — check your connection and try again.");
+  }).catch(function(err){
+    alert(err.message || "Couldn't delete that account — check your connection and try again.");
   });
 }
 function moveDealToCompany(dealId){
@@ -2021,6 +2020,76 @@ function genAdminPassword(){
   el.value = genTempPassword();
   el.type = "text";
 }
+function openTrashModal(){
+  apiCall("getTrash", {}).then(function(res){
+    APP.trash = res.trash || [];
+    renderTrashModal();
+  }).catch(function(){ alert("Couldn't load Recently Deleted — check your connection."); });
+}
+function renderTrashModal(){
+  var rows = (APP.trash || []).map(function(t){
+    var d = t.deal || {};
+    var companyName = "";
+    for(var i=0;i<APP.companies.length;i++){ if(APP.companies[i].id === t.originalCompanyId){ companyName = APP.companies[i].name; break; } }
+    return '<div class="company-row">' +
+      '<div class="cname">'+esc(d.customerName||"(unnamed)")+' <span class="small" style="font-weight:400;">— '+esc(companyName||"unknown partner")+'</span></div>' +
+      '<div class="code-line"><span class="lbl">Deleted by '+esc(t.deletedBy||"—")+' on '+esc(new Date(t.deletedAt).toLocaleString())+'</span>' +
+      '<span><button class="btn-teal btn-small" data-action="restore-deal" data-id="'+esc(d.id)+'">Restore</button> ' +
+      '<button class="btn-danger btn-small" data-action="purge-deal" data-id="'+esc(d.id)+'">Delete forever</button></span></div>' +
+      '</div>';
+  }).join("");
+  var html = '<div class="modal-bg" id="trash-modal-bg"><div class="modal wide">' +
+    '<button class="close" data-action="close-modal">×</button>' +
+    '<h3>Recently Deleted</h3><p class="small">Deleted accounts land here first instead of disappearing outright — restore one, or delete it forever. Entries older than 90 days are cleared out automatically.</p>' +
+    '<div class="company-list">'+(rows || '<div class="empty" style="padding:20px 10px;"><div class="big">Nothing here</div><div>Anything deleted recently will show up in this list.</div></div>')+'</div>' +
+    '</div></div>';
+  modalLayer.innerHTML = html;
+  document.getElementById("trash-modal-bg").addEventListener("click", function(e){ if(e.target.id === "trash-modal-bg") closeModal(); });
+}
+function openBackupsModal(){
+  apiCall("listBackups", {}).then(function(res){
+    APP.backups = res.backups || [];
+    renderBackupsModal();
+  }).catch(function(){ alert("Couldn't load backups — check your connection."); });
+}
+function renderBackupsModal(){
+  var kindLabel = {auto:"Automatic (daily)", manual:"Manual", "pre-restore-safety":"Safety copy (before a restore)"};
+  var rows = (APP.backups || []).map(function(b){
+    return '<div class="company-row"><div class="code-line">' +
+      '<span class="lbl">'+esc(new Date(b.createdAt).toLocaleString())+' — <span class="small">'+esc(kindLabel[b.kind]||b.kind)+' · '+esc(b.keyCount)+' records · by '+esc(b.createdBy||"—")+'</span></span>' +
+      '<span><button class="btn-danger btn-small" data-action="restore-backup" data-id="'+esc(b.id)+'">Restore this</button></span>' +
+      '</div></div>';
+  }).join("");
+  var html = '<div class="modal-bg" id="backups-modal-bg"><div class="modal wide">' +
+    '<button class="close" data-action="close-modal">×</button>' +
+    '<h3>Backups</h3><p class="small">A full snapshot of everything — every partner, account, and setting — taken automatically once a day, and any time before a risky action. Keeps the most recent 14.</p>' +
+    '<button class="btn-teal btn-small" data-action="create-backup" style="margin-bottom:14px;">Backup now</button>' +
+    '<div class="company-list">'+(rows || '<div class="empty" style="padding:20px 10px;"><div class="big">No backups yet</div><div>One will be taken automatically the first time it\'s needed.</div></div>')+'</div>' +
+    '</div></div>';
+  modalLayer.innerHTML = html;
+  document.getElementById("backups-modal-bg").addEventListener("click", function(e){ if(e.target.id === "backups-modal-bg") closeModal(); });
+}
+function openActivityLogModal(){
+  apiCall("getActivityLog", {}).then(function(res){
+    APP.activityLog = res.log || [];
+    renderActivityLogModal();
+  }).catch(function(){ alert("Couldn't load the activity log — check your connection."); });
+}
+function renderActivityLogModal(){
+  var typeLabel = {login:"Signed in", logout:"Signed out", "code-login":"Used access code", action:"Action"};
+  var rows = (APP.activityLog || []).map(function(l){
+    return '<div class="code-line"><span class="lbl"><strong>'+esc(typeLabel[l.type]||l.type)+'</strong> — '+esc(l.actor||"—")+
+      (l.detail ? ' <span class="small">'+esc(l.detail)+'</span>' : '')+'</span>' +
+      '<span class="small">'+esc(new Date(l.at).toLocaleString())+'</span></div>';
+  }).join("");
+  var html = '<div class="modal-bg" id="activity-log-modal-bg"><div class="modal wide">' +
+    '<button class="close" data-action="close-modal">×</button>' +
+    '<h3>Activity Log</h3><p class="small">Logins, logouts, which access code was used, and key actions taken — most recent first.</p>' +
+    '<div class="company-list">'+(rows || '<div class="empty" style="padding:20px 10px;"><div class="big">Nothing logged yet</div></div>')+'</div>' +
+    '</div></div>';
+  modalLayer.innerHTML = html;
+  document.getElementById("activity-log-modal-bg").addEventListener("click", function(e){ if(e.target.id === "activity-log-modal-bg") closeModal(); });
+}
 function addAdminTeamMember(){
   var nameEl = document.getElementById("new-admin-name");
   var emailEl = document.getElementById("new-admin-email");
@@ -2136,7 +2205,10 @@ document.addEventListener("click", function(e){
   var action = t.getAttribute("data-action");
   var id = t.getAttribute("data-id");
 
-  if(action === "logout"){ stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatus="all"; renderApp(); }
+  if(action === "logout"){
+    if(APP.session) apiCall("logout", {}).catch(function(){});
+    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatus="all"; renderApp();
+  }
   else if(action === "show-admin"){ APP.showAdminField = true; APP.loginErr=""; renderApp(); }
   else if(action === "hide-admin"){ APP.showAdminField = false; APP.loginErr=""; renderApp(); }
   else if(action === "flow-access"){ APP.loginFlow = "access"; APP.loginErr=""; renderApp(); }
@@ -2171,6 +2243,39 @@ document.addEventListener("click", function(e){
   else if(action === "add-member"){ addCompanyMember(id); }
   else if(action === "remove-member"){ removeCompanyMember(id, t.getAttribute("data-mid")); }
   else if(action === "open-admin-team"){ openAdminTeamModal(); }
+  else if(action === "open-trash"){ openTrashModal(); }
+  else if(action === "open-backups"){ openBackupsModal(); }
+  else if(action === "open-activity-log"){ openActivityLogModal(); }
+  else if(action === "create-backup"){
+    apiCall("createBackup", {}).then(function(res){
+      APP.backups = [res.backup].concat(APP.backups || []);
+      renderBackupsModal();
+    }).catch(function(err){ alert(err.message || "Couldn't create a backup."); });
+  }
+  else if(action === "restore-backup"){
+    var ok3 = window.confirm("Restore this backup? Everything currently saved will be replaced with what's in this snapshot. A safety copy of the current state is taken first, so this itself can be undone if needed. Continue?");
+    if(!ok3) return;
+    apiCall("restoreBackup", {backupId: id}).then(function(){
+      alert("Backup restored. Reloading the page to pick up the restored data.");
+      window.location.reload();
+    }).catch(function(err){ alert(err.message || "Couldn't restore that backup."); });
+  }
+  else if(action === "restore-deal"){
+    apiCall("restoreDeal", {dealId: id}).then(function(){
+      APP.trash = (APP.trash || []).filter(function(t){ return t.deal.id !== id; });
+      renderTrashModal();
+      // Refresh the main list so the restored account shows up immediately.
+      apiCall("getAllDeals").then(function(res){ APP.deals = res.deals || []; });
+    }).catch(function(err){ alert(err.message || "Couldn't restore that account."); });
+  }
+  else if(action === "purge-deal"){
+    var ok2 = window.confirm("Delete this forever? There's no getting it back after this.");
+    if(!ok2) return;
+    apiCall("purgeDealForever", {dealId: id}).then(function(){
+      APP.trash = (APP.trash || []).filter(function(t){ return t.deal.id !== id; });
+      renderTrashModal();
+    }).catch(function(err){ alert(err.message || "Couldn't delete that."); });
+  }
   else if(action === "add-admin-member"){ addAdminTeamMember(); }
   else if(action === "remove-admin-member"){ removeAdminTeamMember(id); }
   else if(action === "open-change-password"){ openChangePasswordModal(); }
