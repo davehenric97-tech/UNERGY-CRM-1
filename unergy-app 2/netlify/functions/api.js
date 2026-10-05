@@ -6,6 +6,7 @@
 const crypto = require("crypto");
 const { getStore } = require("@netlify/blobs");
 
+const API_VERSION = "2026-10-05-status";
 const SECRET = process.env.SESSION_SECRET || "change-this-secret-before-real-use";
 const store = () => getStore({
   name: "unergy-data",
@@ -369,6 +370,36 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// ---------- keeping list responses small: photos/PDFs travel separately ----------
+// Account lists used to ship every uploaded bill/income photo inside the list itself,
+// which grows past what one response can carry (Netlify caps it near 6MB). Lists now
+// carry a tiny placeholder instead, and the real file is fetched when an account is opened.
+const FILE_FIELDS = ["billFile", "incomeVerificationFile"];
+function stubDealFiles(d, isAdmin) {
+  const o = { ...d };
+  for (const f of FILE_FIELDS) {
+    if (o[f] && o[f].dataUrl) o[f] = { stub: true, name: o[f].name, type: o[f].type };
+  }
+  if (!isAdmin) delete o.incomeVerificationFile; // admin-only data — never sent to partner browsers
+  return o;
+}
+// Safety net for saves: if the page sends back a placeholder, keep the stored file as-is
+// instead of overwriting it. Only an explicit placeholder is ever swapped back in.
+function restoreStubbedFiles(incoming, existing) {
+  const byId = {};
+  (existing || []).forEach((d) => { byId[d.id] = d; });
+  return (incoming || []).map((d) => {
+    const o = { ...d };
+    for (const f of FILE_FIELDS) {
+      if (o[f] && o[f].stub === true) {
+        const ex = byId[d.id];
+        o[f] = (ex && ex[f]) || null;
+      }
+    }
+    return o;
+  });
+}
+
 // ---------- external partner API (a company's own software calls this — never a browser session) ----------
 function stripDealForApi(d) {
   // billFile is dropped from LIST responses (it's a full base64 image and
@@ -399,6 +430,22 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
+
+  // Status page: visiting the API address in a browser (a GET) now returns a tiny,
+  // non-sensitive health report instead of "Method not allowed" — which version of
+  // this file is live, and whether the server can reach its storage right now.
+  if (event.httpMethod === "GET") {
+    const started = Date.now();
+    let storage = { ok: true };
+    try { await getJSON("admin-team"); }
+    catch (e) { storage = { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
+    return {
+      statusCode: 200,
+      headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store" },
+      body: JSON.stringify({ ok: storage.ok, apiVersion: API_VERSION, storage, ms: Date.now() - started, time: new Date().toISOString() }),
+    };
+  }
+
   if (event.httpMethod !== "POST") return { statusCode: 405, headers: cors, body: "Method not allowed" };
 
   let body;
@@ -792,7 +839,7 @@ exports.handler = async (event) => {
         // Partners never see accounts admin has marked hidden-from-partner —
         // admin's own view (getAllDeals) always sees everything.
         const visible = session.role === "admin" ? deals : deals.filter((d) => !d.hiddenFromPartner);
-        return ok(cors, { deals: visible });
+        return ok(cors, { deals: visible.map((d) => stubDealFiles(d, session.role === "admin")) });
       }
 
       case "getAllDeals": {
@@ -803,13 +850,25 @@ exports.handler = async (event) => {
           const deals = (await getJSON("deals-" + co.id)) || [];
           all = all.concat(deals);
         }
-        return ok(cors, { deals: all });
+        return ok(cors, { deals: all.map((d) => stubDealFiles(d, true)) });
       }
 
       case "setDeals": {
         requireCompanyAccess(session, p.companyId);
-        await setJSON("deals-" + p.companyId, p.deals || []);
+        const existingDeals = (await getJSON("deals-" + p.companyId)) || [];
+        await setJSON("deals-" + p.companyId, restoreStubbedFiles(p.deals || [], existingDeals));
         return ok(cors, { done: true });
+      }
+
+      case "getDealFiles": {
+        requireCompanyAccess(session, p.companyId);
+        const deals = (await getJSON("deals-" + p.companyId)) || [];
+        const d = deals.find((x) => x.id === p.dealId);
+        if (!d || (session.role !== "admin" && d.hiddenFromPartner)) { const e = new Error("Account not found"); e.status = 404; throw e; }
+        return ok(cors, {
+          billFile: d.billFile || null,
+          incomeVerificationFile: session.role === "admin" ? (d.incomeVerificationFile || null) : null,
+        });
       }
 
       case "deleteDeal": {
@@ -840,7 +899,7 @@ exports.handler = async (event) => {
         const before = trash.length;
         trash = trash.filter((t) => new Date(t.deletedAt).getTime() > cutoff);
         if (trash.length !== before) await setJSON("trash", trash);
-        return ok(cors, { trash });
+        return ok(cors, { trash: trash.map((t) => ({ ...t, deal: stubDealFiles(t.deal, true) })) });
       }
 
       case "restoreDeal": {
@@ -889,7 +948,7 @@ exports.handler = async (event) => {
         toDeals.push(deal);
         await setJSON("deals-" + toCompanyId, toDeals);
         await logActivity("action", session.personName || session.personEmail, "Moved account " + (deal.customerName || dealId) + " between partners");
-        return ok(cors, { deal });
+        return ok(cors, { deal: stubDealFiles(deal, true) });
       }
 
       case "submitDeal": {
