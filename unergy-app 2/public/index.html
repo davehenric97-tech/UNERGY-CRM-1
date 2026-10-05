@@ -1248,12 +1248,12 @@ function pdfPreviewHtml(file, label){
     '<iframe src="'+file.dataUrl+'" title="'+esc(label)+'" style="width:100%;max-width:560px;height:420px;border:1px solid var(--line);border-radius:8px;display:block;"></iframe>';
 }
 function billPreviewHtml(billFile){
-  if(!billFile) return "";
+  if(!billFile || !billFile.dataUrl) return "";
   if(billFile.type === "application/pdf") return pdfPreviewHtml(billFile, "Electric bill");
   return '<div data-action="view-bill-image" style="cursor:zoom-in;display:inline-block;"><img src="'+billFile.dataUrl+'" class="bill-thumb" alt="Electric bill — click to enlarge"></div>';
 }
 function incomeFilePreviewHtml(incomeFile){
-  if(!incomeFile) return "";
+  if(!incomeFile || !incomeFile.dataUrl) return "";
   if(incomeFile.type === "application/pdf") return pdfPreviewHtml(incomeFile, "Income verification");
   return '<div data-action="view-income-image" style="cursor:zoom-in;display:inline-block;"><img src="'+incomeFile.dataUrl+'" class="bill-thumb" alt="Income verification — click to enlarge"></div>';
 }
@@ -1394,9 +1394,25 @@ function wireIncomeUpload(){
 function closeModal(){ modalLayer.innerHTML = ""; lightboxLayer.innerHTML = ""; pendingBillFile = null; pendingIncomeFile = null; pendingBillingLog = null; }
 
 /* ============ ADMIN: edit / add deal modals ============ */
+function dealHasStubFiles(deal){
+  return !!((deal.billFile && deal.billFile.stub) || (deal.incomeVerificationFile && deal.incomeVerificationFile.stub));
+}
 function openEditDealModal(dealId){
   var deal = APP.deals.filter(function(d){ return d.id === dealId; })[0];
   if(!deal) return;
+  // Account lists carry only placeholders for photos/PDFs (keeps them small);
+  // fetch this account's real files before showing it.
+  if(dealHasStubFiles(deal)){
+    apiCall("getDealFiles", {companyId: deal.companyId, dealId: deal.id}).then(function(res){
+      deal.billFile = res.billFile || null;
+      if(APP.session.role === "admin") deal.incomeVerificationFile = res.incomeVerificationFile || null;
+      else delete deal.incomeVerificationFile;
+      openEditDealModal(dealId);
+    }).catch(function(){
+      alert("Couldn't load this account's photos — check your connection and try again.");
+    });
+    return;
+  }
   pendingBillFile = deal.billFile;
   pendingBillingLog = null;
   var readOnly = APP.session.role !== "admin";
