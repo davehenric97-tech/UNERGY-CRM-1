@@ -575,7 +575,7 @@ function confirmImport(){
 
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
-var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatus:"all", searchQuery:"" };
+var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, sortBy:"updated", searchQuery:"" };
 var gridRefreshTimer = null;
 var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
@@ -680,16 +680,23 @@ function companyName(id){
 }
 
 /* ============ ADMIN ============ */
+var SORT_FNS = {
+  updated: function(a,b){ return new Date(b.updatedAt) - new Date(a.updatedAt); },
+  status: function(a,b){ return STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status); },
+  name: function(a,b){ return (a.customerName||"").localeCompare(b.customerName||""); },
+  partner: function(a,b){ return (a.companyId||"").localeCompare(b.companyId||""); }
+};
 function buildAdminView(){
   var deals = APP.deals.slice();
   var q = (APP.searchQuery || "").trim().toLowerCase();
+  var activeStatuses = APP.filterStatuses; // null = all statuses; array (incl. empty) = exactly those selected
   var filtered = deals.filter(function(d){
     if(!((APP.filterCo === "all" || !APP.filterCo || d.companyId === APP.filterCo) &&
-         (APP.filterStatus === "all" || !APP.filterStatus || d.status === APP.filterStatus))) return false;
+         (activeStatuses === null || activeStatuses.indexOf(d.status) > -1))) return false;
     if(!q) return true;
     var hay = [d.customerName, d.serviceAddress, d.billingAddress, d.email, d.phone, d.esiid, d.currentREP].join(" ").toLowerCase();
     return hay.indexOf(q) > -1;
-  }).sort(function(a,b){ return new Date(b.updatedAt) - new Date(a.updatedAt); });
+  }).sort(SORT_FNS[APP.sortBy] || SORT_FNS.updated);
 
   var newCount = deals.filter(function(d){ return d.status === "NEW"; }).length;
   var activeCount = deals.filter(function(d){ return d.status !== "Cancelled" && d.status !== "Will NOT send Contract"; }).length;
@@ -697,9 +704,13 @@ function buildAdminView(){
 
   var coOpts = '<option value="all">All companies</option>';
   APP.companies.forEach(function(c){ coOpts += '<option value="'+esc(c.id)+'"'+(APP.filterCo===c.id?" selected":"")+'>'+esc(c.name)+'</option>'; });
-  var statusOpts = '<option value="all">All statuses</option>' + optionsHtml(STATUSES, APP.filterStatus, false);
+  var sortOpts = [
+    ["updated","Last updated"], ["status","Status"], ["name","Customer name"], ["partner","Partner"]
+  ].map(function(o){ return '<option value="'+o[0]+'"'+(APP.sortBy===o[0]?" selected":"")+'>Sort: '+o[1]+'</option>'; }).join("");
+  var statusBtnLabel = (activeStatuses === null || activeStatuses.length === STATUSES.length) ? "All statuses" :
+    (activeStatuses.length === 0 ? "None selected" : (activeStatuses.length === 1 ? activeStatuses[0] : activeStatuses.length + " statuses selected"));
 
-  var html = buildGridWidget();
+  var html = (APP.loadWarning ? '<div class="err" style="margin-bottom:12px;">'+esc(APP.loadWarning)+'</div>' : '') + buildGridWidget();
   html += '<div class="stats-row">' +
     stat(deals.length, "Total accounts") + stat(newCount, "New", "var(--amber)") +
     stat(activeCount, "In pipeline", "var(--teal)") + stat(activatedCount, "Active", "var(--green)") +
@@ -708,7 +719,8 @@ function buildAdminView(){
   html += '<div class="toolbar"><div class="toolbar-left">' +
     '<input id="search-query" placeholder="Search customer, address, email, phone, ESIID…" value="'+esc(APP.searchQuery||"")+'" style="width:auto;min-width:240px;">' +
     '<select class="filter-select" id="filter-co">'+coOpts+'</select>' +
-    '<select class="filter-select" id="filter-status">'+statusOpts+'</select>' +
+    '<button class="btn-ghost btn-small" data-action="open-status-filter">Status: '+esc(statusBtnLabel)+'</button>' +
+    '<select class="filter-select" id="sort-by">'+sortOpts+'</select>' +
     '</div><div class="top-actions">' +
     '<button class="btn-ghost btn-small" data-action="open-companies">Manage partners</button>' +
     '<button class="btn-ghost btn-small" data-action="open-admin-team">UNERGY team</button>' +
@@ -2069,6 +2081,24 @@ function renderBackupsModal(){
   modalLayer.innerHTML = html;
   document.getElementById("backups-modal-bg").addEventListener("click", function(e){ if(e.target.id === "backups-modal-bg") closeModal(); });
 }
+function openStatusFilterModal(){
+  var active = APP.filterStatuses; // null = all
+  var rows = STATUSES.map(function(s){
+    var checked = active === null || active.indexOf(s) > -1;
+    return '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">' +
+      '<input type="checkbox" data-action="toggle-status-filter" data-status="'+esc(s)+'"'+(checked?' checked':'')+'> '+esc(s)+
+      '</label>';
+  }).join("");
+  var html = '<div class="modal-bg" id="status-filter-modal-bg"><div class="modal">' +
+    '<button class="close" data-action="close-modal">×</button>' +
+    '<h3>Filter by status</h3><p class="small">Pick any combination — handy for a department that only cares about a few stages (e.g. deployment: Contract Signed, Ready to activate, Activated).</p>' +
+    '<div style="margin-bottom:10px;"><button class="btn-ghost btn-small" data-action="status-filter-all">Select all</button> ' +
+    '<button class="btn-ghost btn-small" data-action="status-filter-none">Clear all</button></div>' +
+    '<div>'+rows+'</div>' +
+    '</div></div>';
+  modalLayer.innerHTML = html;
+  document.getElementById("status-filter-modal-bg").addEventListener("click", function(e){ if(e.target.id === "status-filter-modal-bg") closeModal(); });
+}
 function openActivityLogModal(){
   apiCall("getActivityLog", {}).then(function(res){
     APP.activityLog = res.log || [];
@@ -2178,24 +2208,49 @@ function attemptLogin(email, password){
   }).catch(function(err){ APP.loginErr = err.message; renderApp(); });
 }
 function finishAdminLogin(){
-  Promise.all([apiCall("getAllDeals"), apiCall("getCompanies"), apiCall("getNotifications", {scope:"admin"}), apiCall("getAllMessages"), apiCall("getAdminTeam"), apiCall("getAppSettings")])
-    .then(function(res){
-      APP.deals = res[0].deals || [];
-      APP.companies = res[1].companies || [];
-      APP.filterCo = "all"; APP.filterStatus = "all";
-      APP.notifications = res[2].notifications || [];
-      APP.messagesByCompany = res[3].messagesByCompany || {};
-      APP.adminTeam = res[4].team || [];
-      APP.demoFullCapture = !!(res[5] && res[5].demoFullCapture);
-      renderApp();
-      startGridRefresh();
-      startLiveUpdatePolling();
-    }).catch(function(){
-      // Saved token no longer works (e.g. it's stale) — fall back to a clean login screen.
+  // Each data load is attempted on its own, so one failing call can no longer
+  // silently bounce you back to a blank login screen. Whatever loads is shown;
+  // anything that fails is named in a banner so the cause is visible.
+  var calls = [
+    ["Accounts", apiCall("getAllDeals")],
+    ["Partners", apiCall("getCompanies")],
+    ["Notifications", apiCall("getNotifications", {scope:"admin"})],
+    ["Messages", apiCall("getAllMessages")],
+    ["Team", apiCall("getAdminTeam")],
+    ["Settings", apiCall("getAppSettings")]
+  ];
+  Promise.all(calls.map(function(c){
+    return c[1].then(function(v){ return {ok:true, v:v}; }, function(e){ return {ok:false, msg:(e && e.message) || "failed"}; });
+  })).then(function(rs){
+    var failures = [];
+    var authFailed = false;
+    rs.forEach(function(r, i){
+      if(!r.ok){
+        failures.push(calls[i][0] + " (" + r.msg + ")");
+        if(/^(unauthorized|forbidden)$/i.test(r.msg)) authFailed = true;
+      }
+    });
+    if(authFailed){
+      // Saved sign-in is no longer valid — fall back to a clean login screen.
       clearSavedSession();
       APP.session = null; APP.authToken = null;
+      APP.loginErr = "Your session expired — please sign in again.";
       renderApp();
-    });
+      return;
+    }
+    var v = function(i, key, dflt){ return rs[i].ok && rs[i].v && rs[i].v[key] != null ? rs[i].v[key] : dflt; };
+    APP.deals = v(0, "deals", []);
+    APP.companies = v(1, "companies", []);
+    APP.filterCo = "all"; APP.filterStatuses = null;
+    APP.notifications = v(2, "notifications", []);
+    APP.messagesByCompany = v(3, "messagesByCompany", {});
+    APP.adminTeam = v(4, "team", []);
+    APP.demoFullCapture = !!v(5, "demoFullCapture", false);
+    APP.loadWarning = failures.length ? ("Some data couldn't load: " + failures.join("; ") + ". Refresh to retry — if it keeps happening, send this message to support.") : "";
+    renderApp();
+    startGridRefresh();
+    startLiveUpdatePolling();
+  });
 }
 
 /* ============ EVENT DELEGATION ============ */
@@ -2207,7 +2262,7 @@ document.addEventListener("click", function(e){
 
   if(action === "logout"){
     if(APP.session) apiCall("logout", {}).catch(function(){});
-    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatus="all"; renderApp();
+    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatuses=null; renderApp();
   }
   else if(action === "show-admin"){ APP.showAdminField = true; APP.loginErr=""; renderApp(); }
   else if(action === "hide-admin"){ APP.showAdminField = false; APP.loginErr=""; renderApp(); }
@@ -2246,6 +2301,18 @@ document.addEventListener("click", function(e){
   else if(action === "open-trash"){ openTrashModal(); }
   else if(action === "open-backups"){ openBackupsModal(); }
   else if(action === "open-activity-log"){ openActivityLogModal(); }
+  else if(action === "open-status-filter"){ openStatusFilterModal(); }
+  else if(action === "toggle-status-filter"){
+    var statusVal = t.getAttribute("data-status");
+    var current = APP.filterStatuses === null ? STATUSES.slice() : APP.filterStatuses.slice();
+    var sidx = current.indexOf(statusVal);
+    if(t.checked){ if(sidx === -1) current.push(statusVal); } else { if(sidx > -1) current.splice(sidx,1); }
+    APP.filterStatuses = current;
+    renderApp();
+    openStatusFilterModal();
+  }
+  else if(action === "status-filter-all"){ APP.filterStatuses = null; renderApp(); openStatusFilterModal(); }
+  else if(action === "status-filter-none"){ APP.filterStatuses = []; renderApp(); openStatusFilterModal(); }
   else if(action === "create-backup"){
     apiCall("createBackup", {}).then(function(res){
       APP.backups = [res.backup].concat(APP.backups || []);
@@ -2376,7 +2443,7 @@ document.addEventListener("input", function(e){
 document.addEventListener("change", function(e){
   var t = e.target;
   if(t.id === "filter-co"){ APP.filterCo = t.value; renderApp(); }
-  else if(t.id === "filter-status"){ APP.filterStatus = t.value; renderApp(); }
+  else if(t.id === "sort-by"){ APP.sortBy = t.value; renderApp(); }
   else if(t.getAttribute && t.getAttribute("data-action") === "inline-status"){
     var dealId = t.getAttribute("data-id");
     var newStatus = t.value;
@@ -2400,7 +2467,7 @@ document.addEventListener("change", function(e){
 /* ============ INIT — restore a saved session if there is one, so a page ============ */
 /* refresh doesn't force a fresh login; otherwise nothing is fetched until   */
 /* a login action fires.                                                    */
-APP.filterCo = "all"; APP.filterStatus = "all";
+APP.filterCo = "all"; APP.filterStatuses = null;
 (function tryRestoreSession(){
   var saved = loadSavedSession();
   if(!saved || !saved.token || !saved.session){ renderApp(); return; }
