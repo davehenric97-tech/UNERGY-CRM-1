@@ -970,11 +970,19 @@ function buildPartnerView(){
     return buildSubmitTabContent(true);
   }
   var q = (APP.searchQuery || "").trim().toLowerCase();
+  var activeStatuses = APP.filterStatuses; // null = all statuses; array (incl. empty) = exactly those selected
+  var partnerSort = (APP.sortBy === "status" || APP.sortBy === "name") ? APP.sortBy : "updated";
   var deals = APP.deals.slice().filter(function(d){
+    if(activeStatuses !== null && activeStatuses.indexOf(d.status) === -1) return false;
     if(!q) return true;
     var hay = [d.customerName, d.serviceAddress, d.billingAddress, d.email, d.phone, d.esiid].join(" ").toLowerCase();
     return hay.indexOf(q) > -1;
-  }).sort(function(a,b){ return new Date(b.updatedAt) - new Date(a.updatedAt); });
+  }).sort(SORT_FNS[partnerSort]);
+  var partnerSortOpts = [["updated","Last updated"], ["status","Status"], ["name","Customer name"]].map(function(o){
+    return '<option value="'+o[0]+'"'+(partnerSort===o[0]?" selected":"")+'>Sort: '+o[1]+'</option>';
+  }).join("");
+  var statusBtnLabel = (activeStatuses === null || activeStatuses.length === STATUSES.length) ? "All statuses" :
+    (activeStatuses.length === 0 ? "None selected" : (activeStatuses.length === 1 ? activeStatuses[0] : activeStatuses.length + " statuses selected"));
   var newCount = APP.deals.filter(function(d){ return d.status === "NEW"; }).length;
   var activeCount = APP.deals.filter(function(d){ return d.status === "Activated"; }).length;
 
@@ -992,12 +1000,18 @@ function buildPartnerView(){
 
   html += '<div class="stats-row" style="margin-top:16px;">' + stat(APP.deals.length,"Your accounts") + stat(newCount,"Pending review","var(--amber)") + stat(activeCount,"Active","var(--green)") + '</div>';
   html += buildGridWidget();
-  html += '<div class="toolbar" style="justify-content:flex-start;">' +
+  html += '<div class="toolbar" style="justify-content:flex-start;"><div class="toolbar-left">' +
     '<input id="search-query" placeholder="Search customer, address, email, phone…" value="'+esc(APP.searchQuery||"")+'" style="width:auto;min-width:240px;">' +
-    '</div>';
+    '<button class="btn-ghost btn-small" data-action="open-status-filter">Status: '+esc(statusBtnLabel)+'</button>' +
+    '<select class="filter-select" id="sort-by">'+partnerSortOpts+'</select>' +
+    '</div></div>';
   if(APP.saveErr) html += '<div class="err" style="margin-bottom:12px;">Last change may not have saved — check your connection.</div>';
   if(deals.length === 0){
-    html += '<div class="empty"><div class="big">No accounts match</div><div>Use the Submit a Client tab to add your first lead.</div></div>';
+    if(APP.deals.length > 0){
+      html += '<div class="empty"><div class="big">No accounts match your filters</div><div><a class="linklike" data-action="clear-filters">Clear search &amp; status filter</a></div></div>';
+    } else {
+      html += '<div class="empty"><div class="big">No accounts match</div><div>Use the Submit a Client tab to add your first lead.</div></div>';
+    }
   } else {
     html += '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Service address</th><th>Solar/Battery</th><th>Battery brand</th><th>Status</th><th>Payment status</th><th>VPP enabled</th><th>Updated</th><th></th></tr></thead><tbody>';
     deals.forEach(function(d){
@@ -2107,7 +2121,7 @@ function openStatusFilterModal(){
   }).join("");
   var html = '<div class="modal-bg" id="status-filter-modal-bg"><div class="modal">' +
     '<button class="close" data-action="close-modal">×</button>' +
-    '<h3>Filter by status</h3><p class="small">Pick any combination — handy for a department that only cares about a few stages (e.g. deployment: Contract Signed, Ready to activate, Activated).</p>' +
+    '<h3>Filter by status</h3><p class="small">'+(APP.session && APP.session.role === "admin" ? 'Pick any combination — handy for a department that only cares about a few stages (e.g. deployment: Contract Signed, Ready to activate, Activated).' : 'Pick any combination of stages to show just those projects.')+'</p>' +
     '<div style="margin-bottom:10px;"><button class="btn-ghost btn-small" data-action="status-filter-all">Select all</button> ' +
     '<button class="btn-ghost btn-small" data-action="status-filter-none">Clear all</button></div>' +
     '<div>'+rows+'</div>' +
@@ -2278,7 +2292,7 @@ document.addEventListener("click", function(e){
 
   if(action === "logout"){
     if(APP.session) apiCall("logout", {}).catch(function(){});
-    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatuses=null; renderApp();
+    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatuses=null; APP.sortBy="updated"; renderApp();
   }
   else if(action === "show-admin"){ APP.showAdminField = true; APP.loginErr=""; renderApp(); }
   else if(action === "hide-admin"){ APP.showAdminField = false; APP.loginErr=""; renderApp(); }
@@ -2318,6 +2332,7 @@ document.addEventListener("click", function(e){
   else if(action === "open-backups"){ openBackupsModal(); }
   else if(action === "open-activity-log"){ openActivityLogModal(); }
   else if(action === "open-status-filter"){ openStatusFilterModal(); }
+  else if(action === "clear-filters"){ APP.filterStatuses = null; APP.searchQuery = ""; renderApp(); }
   else if(action === "toggle-status-filter"){
     var statusVal = t.getAttribute("data-status");
     var current = APP.filterStatuses === null ? STATUSES.slice() : APP.filterStatuses.slice();
