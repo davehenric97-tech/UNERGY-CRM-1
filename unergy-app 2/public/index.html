@@ -101,6 +101,14 @@ select.status-select{width:auto;padding:6px 8px;font-size:12px;}
 .code-line{display:flex;justify-content:space-between;align-items:center;padding:5px 0;}
 .code-line .lbl{font-size:11.5px;color:var(--textdim);}
 .filter-select{width:auto;min-width:150px;}
+.status-menu-wrap{position:relative;display:inline-block;}
+.status-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:60;min-width:260px;max-height:380px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(18,36,28,.18);padding:6px;}
+.status-opt{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:14px;}
+.status-opt:hover{background:var(--panel2);}
+.status-opt.on{font-weight:600;}
+.status-opt .chk{width:16px;color:var(--green);font-weight:700;}
+.status-opt .cnt{margin-left:auto;color:var(--textdim);font-size:12px;}
+.status-sep{height:1px;background:var(--line);margin:4px 0;}
 .top-actions{display:flex;gap:8px;}
 a.linklike{color:var(--teal);cursor:pointer;text-decoration:underline;font-size:12.5px;}
 .footer-note{color:var(--textdim);font-size:11.5px;margin-top:40px;text-align:center;}
@@ -575,7 +583,7 @@ function confirmImport(){
 
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
-var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, sortBy:"updated", searchQuery:"" };
+var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, statusMenuOpen:false, searchQuery:"" };
 var gridRefreshTimer = null;
 var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
@@ -680,12 +688,30 @@ function companyName(id){
 }
 
 /* ============ ADMIN ============ */
-var SORT_FNS = {
-  updated: function(a,b){ return new Date(b.updatedAt) - new Date(a.updatedAt); },
-  status: function(a,b){ return STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status); },
-  name: function(a,b){ return (a.customerName||"").localeCompare(b.customerName||""); },
-  partner: function(a,b){ return (a.companyId||"").localeCompare(b.companyId||""); }
-};
+// The list is always ordered by whoever/whatever was touched most recently.
+function byLastInteracted(a,b){ return new Date(b.updatedAt) - new Date(a.updatedAt); }
+// One dropdown button for the status filter. APP.filterStatuses is null for "all",
+// otherwise a non-empty list of the statuses being shown. The first click picks just
+// that status; more clicks add or remove others; clearing the last one goes back to all.
+function statusMenuHtml(baseDeals){
+  var sel = APP.filterStatuses;
+  var counts = {};
+  baseDeals.forEach(function(d){ counts[d.status] = (counts[d.status] || 0) + 1; });
+  var label = sel === null ? "All statuses" : (sel.length === 1 ? sel[0] : sel.length + " statuses");
+  var h = '<div class="status-menu-wrap">' +
+    '<button class="btn-ghost btn-small" data-action="toggle-status-menu">Status: ' + esc(label) + ' ▾</button>';
+  if(APP.statusMenuOpen){
+    h += '<div class="status-menu">' +
+      '<div class="status-opt'+(sel===null?' on':'')+'" data-action="status-all"><span class="chk">'+(sel===null?'✓':'')+'</span>All statuses<span class="cnt">'+baseDeals.length+'</span></div>' +
+      '<div class="status-sep"></div>';
+    STATUSES.forEach(function(s){
+      var on = sel !== null && sel.indexOf(s) > -1;
+      h += '<div class="status-opt'+(on?' on':'')+'" data-action="status-pick" data-status="'+esc(s)+'"><span class="chk">'+(on?'✓':'')+'</span>'+esc(s)+'<span class="cnt">'+(counts[s]||0)+'</span></div>';
+    });
+    h += '</div>';
+  }
+  return h + '</div>';
+}
 function buildAdminView(){
   var deals = APP.deals.slice();
   var q = (APP.searchQuery || "").trim().toLowerCase();
@@ -696,7 +722,7 @@ function buildAdminView(){
     if(!q) return true;
     var hay = [d.customerName, d.serviceAddress, d.billingAddress, d.email, d.phone, d.esiid, d.currentREP].join(" ").toLowerCase();
     return hay.indexOf(q) > -1;
-  }).sort(SORT_FNS[APP.sortBy] || SORT_FNS.updated);
+  }).sort(byLastInteracted);
 
   var newCount = deals.filter(function(d){ return d.status === "NEW"; }).length;
   var activeCount = deals.filter(function(d){ return d.status !== "Cancelled" && d.status !== "Will NOT send Contract"; }).length;
@@ -704,11 +730,7 @@ function buildAdminView(){
 
   var coOpts = '<option value="all">All companies</option>';
   APP.companies.forEach(function(c){ coOpts += '<option value="'+esc(c.id)+'"'+(APP.filterCo===c.id?" selected":"")+'>'+esc(c.name)+'</option>'; });
-  var sortOpts = [
-    ["updated","Last updated"], ["status","Status"], ["name","Customer name"], ["partner","Partner"]
-  ].map(function(o){ return '<option value="'+o[0]+'"'+(APP.sortBy===o[0]?" selected":"")+'>Sort: '+o[1]+'</option>'; }).join("");
-  var statusBtnLabel = (activeStatuses === null || activeStatuses.length === STATUSES.length) ? "All statuses" :
-    (activeStatuses.length === 0 ? "None selected" : (activeStatuses.length === 1 ? activeStatuses[0] : activeStatuses.length + " statuses selected"));
+  var companyScoped = deals.filter(function(d){ return APP.filterCo === "all" || !APP.filterCo || d.companyId === APP.filterCo; });
 
   var html = (APP.loadWarning ? '<div class="err" style="margin-bottom:12px;">'+esc(APP.loadWarning)+'</div>' : '') + buildGridWidget();
   html += '<div class="stats-row">' +
@@ -719,8 +741,7 @@ function buildAdminView(){
   html += '<div class="toolbar"><div class="toolbar-left">' +
     '<input id="search-query" placeholder="Search customer, address, email, phone, ESIID…" value="'+esc(APP.searchQuery||"")+'" style="width:auto;min-width:240px;">' +
     '<select class="filter-select" id="filter-co">'+coOpts+'</select>' +
-    '<button class="btn-ghost btn-small" data-action="open-status-filter">Status: '+esc(statusBtnLabel)+'</button>' +
-    '<select class="filter-select" id="sort-by">'+sortOpts+'</select>' +
+    statusMenuHtml(companyScoped) +
     '</div><div class="top-actions">' +
     '<button class="btn-ghost btn-small" data-action="open-companies">Manage partners</button>' +
     '<button class="btn-ghost btn-small" data-action="open-admin-team">UNERGY team</button>' +
@@ -971,18 +992,13 @@ function buildPartnerView(){
   }
   var q = (APP.searchQuery || "").trim().toLowerCase();
   var activeStatuses = APP.filterStatuses; // null = all statuses; array (incl. empty) = exactly those selected
-  var partnerSort = (APP.sortBy === "status" || APP.sortBy === "name") ? APP.sortBy : "updated";
   var deals = APP.deals.slice().filter(function(d){
     if(activeStatuses !== null && activeStatuses.indexOf(d.status) === -1) return false;
     if(!q) return true;
     var hay = [d.customerName, d.serviceAddress, d.billingAddress, d.email, d.phone, d.esiid].join(" ").toLowerCase();
     return hay.indexOf(q) > -1;
-  }).sort(SORT_FNS[partnerSort]);
-  var partnerSortOpts = [["updated","Last updated"], ["status","Status"], ["name","Customer name"]].map(function(o){
-    return '<option value="'+o[0]+'"'+(partnerSort===o[0]?" selected":"")+'>Sort: '+o[1]+'</option>';
-  }).join("");
-  var statusBtnLabel = (activeStatuses === null || activeStatuses.length === STATUSES.length) ? "All statuses" :
-    (activeStatuses.length === 0 ? "None selected" : (activeStatuses.length === 1 ? activeStatuses[0] : activeStatuses.length + " statuses selected"));
+  }).sort(byLastInteracted);
+
   var newCount = APP.deals.filter(function(d){ return d.status === "NEW"; }).length;
   var activeCount = APP.deals.filter(function(d){ return d.status === "Activated"; }).length;
 
@@ -1002,8 +1018,7 @@ function buildPartnerView(){
   html += buildGridWidget();
   html += '<div class="toolbar" style="justify-content:flex-start;"><div class="toolbar-left">' +
     '<input id="search-query" placeholder="Search customer, address, email, phone…" value="'+esc(APP.searchQuery||"")+'" style="width:auto;min-width:240px;">' +
-    '<button class="btn-ghost btn-small" data-action="open-status-filter">Status: '+esc(statusBtnLabel)+'</button>' +
-    '<select class="filter-select" id="sort-by">'+partnerSortOpts+'</select>' +
+    statusMenuHtml(APP.deals) +
     '</div></div>';
   if(APP.saveErr) html += '<div class="err" style="margin-bottom:12px;">Last change may not have saved — check your connection.</div>';
   if(deals.length === 0){
@@ -2111,24 +2126,6 @@ function renderBackupsModal(){
   modalLayer.innerHTML = html;
   document.getElementById("backups-modal-bg").addEventListener("click", function(e){ if(e.target.id === "backups-modal-bg") closeModal(); });
 }
-function openStatusFilterModal(){
-  var active = APP.filterStatuses; // null = all
-  var rows = STATUSES.map(function(s){
-    var checked = active === null || active.indexOf(s) > -1;
-    return '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">' +
-      '<input type="checkbox" data-action="toggle-status-filter" data-status="'+esc(s)+'"'+(checked?' checked':'')+'> '+esc(s)+
-      '</label>';
-  }).join("");
-  var html = '<div class="modal-bg" id="status-filter-modal-bg"><div class="modal">' +
-    '<button class="close" data-action="close-modal">×</button>' +
-    '<h3>Filter by status</h3><p class="small">'+(APP.session && APP.session.role === "admin" ? 'Pick any combination — handy for a department that only cares about a few stages (e.g. deployment: Contract Signed, Ready to activate, Activated).' : 'Pick any combination of stages to show just those projects.')+'</p>' +
-    '<div style="margin-bottom:10px;"><button class="btn-ghost btn-small" data-action="status-filter-all">Select all</button> ' +
-    '<button class="btn-ghost btn-small" data-action="status-filter-none">Clear all</button></div>' +
-    '<div>'+rows+'</div>' +
-    '</div></div>';
-  modalLayer.innerHTML = html;
-  document.getElementById("status-filter-modal-bg").addEventListener("click", function(e){ if(e.target.id === "status-filter-modal-bg") closeModal(); });
-}
 function openActivityLogModal(){
   apiCall("getActivityLog", {}).then(function(res){
     APP.activityLog = res.log || [];
@@ -2284,7 +2281,19 @@ function finishAdminLogin(){
 }
 
 /* ============ EVENT DELEGATION ============ */
+document.addEventListener("keydown", function(e){
+  if(e.key === "Escape" && APP.statusMenuOpen){
+    APP.statusMenuOpen = false;
+    var escMenu = document.querySelector(".status-menu");
+    if(escMenu) escMenu.remove();
+  }
+});
 document.addEventListener("click", function(e){
+  if(APP.statusMenuOpen && !e.target.closest(".status-menu-wrap")){
+    APP.statusMenuOpen = false;
+    var outsideMenu = document.querySelector(".status-menu");
+    if(outsideMenu) outsideMenu.remove();
+  }
   var t = e.target.closest("[data-action]");
   if(!t) return;
   var action = t.getAttribute("data-action");
@@ -2292,7 +2301,7 @@ document.addEventListener("click", function(e){
 
   if(action === "logout"){
     if(APP.session) apiCall("logout", {}).catch(function(){});
-    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatuses=null; APP.sortBy="updated"; renderApp();
+    stopGridRefresh(); stopLiveUpdatePolling(); clearSavedSession(); APP.session = null; APP.authToken = null; APP.companies=[]; APP.deals=[]; APP.notifications=[]; APP.messagesByCompany={}; APP.adminTeam=[]; APP.showAdminField=false; APP.loginFlow="submit"; APP.searchQuery=""; APP.filterCo="all"; APP.filterStatuses=null; APP.statusMenuOpen=false; renderApp();
   }
   else if(action === "show-admin"){ APP.showAdminField = true; APP.loginErr=""; renderApp(); }
   else if(action === "hide-admin"){ APP.showAdminField = false; APP.loginErr=""; renderApp(); }
@@ -2331,19 +2340,20 @@ document.addEventListener("click", function(e){
   else if(action === "open-trash"){ openTrashModal(); }
   else if(action === "open-backups"){ openBackupsModal(); }
   else if(action === "open-activity-log"){ openActivityLogModal(); }
-  else if(action === "open-status-filter"){ openStatusFilterModal(); }
-  else if(action === "clear-filters"){ APP.filterStatuses = null; APP.searchQuery = ""; renderApp(); }
-  else if(action === "toggle-status-filter"){
-    var statusVal = t.getAttribute("data-status");
-    var current = APP.filterStatuses === null ? STATUSES.slice() : APP.filterStatuses.slice();
-    var sidx = current.indexOf(statusVal);
-    if(t.checked){ if(sidx === -1) current.push(statusVal); } else { if(sidx > -1) current.splice(sidx,1); }
-    APP.filterStatuses = current;
+  else if(action === "toggle-status-menu"){ APP.statusMenuOpen = !APP.statusMenuOpen; renderApp(); }
+  else if(action === "status-all"){ APP.filterStatuses = null; APP.statusMenuOpen = false; renderApp(); }
+  else if(action === "status-pick"){
+    var stMenuVal = t.getAttribute("data-status");
+    if(APP.filterStatuses === null){ APP.filterStatuses = [stMenuVal]; }
+    else {
+      var stMenuCur = APP.filterStatuses.slice();
+      var stMenuIdx = stMenuCur.indexOf(stMenuVal);
+      if(stMenuIdx > -1) stMenuCur.splice(stMenuIdx, 1); else stMenuCur.push(stMenuVal);
+      APP.filterStatuses = stMenuCur.length ? stMenuCur : null;
+    }
     renderApp();
-    openStatusFilterModal();
   }
-  else if(action === "status-filter-all"){ APP.filterStatuses = null; renderApp(); openStatusFilterModal(); }
-  else if(action === "status-filter-none"){ APP.filterStatuses = []; renderApp(); openStatusFilterModal(); }
+  else if(action === "clear-filters"){ APP.filterStatuses = null; APP.searchQuery = ""; APP.statusMenuOpen = false; renderApp(); }
   else if(action === "create-backup"){
     apiCall("createBackup", {}).then(function(res){
       APP.backups = [res.backup].concat(APP.backups || []);
@@ -2474,7 +2484,6 @@ document.addEventListener("input", function(e){
 document.addEventListener("change", function(e){
   var t = e.target;
   if(t.id === "filter-co"){ APP.filterCo = t.value; renderApp(); }
-  else if(t.id === "sort-by"){ APP.sortBy = t.value; renderApp(); }
   else if(t.getAttribute && t.getAttribute("data-action") === "inline-status"){
     var dealId = t.getAttribute("data-id");
     var newStatus = t.value;
