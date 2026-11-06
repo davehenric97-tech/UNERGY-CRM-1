@@ -204,7 +204,7 @@ body:not(.app-authed) .brand .sub{color:rgba(255,255,255,.75);}
 (function(){
 "use strict";
 
-var STATUSES = ["NEW","Missing Information","Missing Electric Bill","Working on Contract","Waiting on approval","Contract Sent","Contract Signed","Ready to activate","Activated","Will NOT send Contract","Cancelled"];
+var STATUSES = ["NEW","Missing Information","Missing Electric Bill","Working on Contract","Waiting on approval","Contract Sent","Contract Signed","Customer Processing","Customer Confirmed","Ready to activate","Activated","Will NOT send Contract","Cancelled"];
 var SOLAR_BATTERY_OPTS = ["Solar and Battery","Solar","Battery Only","Non Solar"];
 var PROPERTY_TYPES = ["Residential","Commercial"];
 var MOVE_SWITCH = ["Move in","Switch"];
@@ -227,8 +227,8 @@ function esc(str){
 function badgeClass(status){
   if(status === "NEW") return "b-new";
   if(["Missing Information","Missing Electric Bill","Cancelled","Will NOT send Contract"].indexOf(status) > -1) return "b-warn";
-  if(["Working on Contract","Waiting on approval","Contract Sent","Ready to activate"].indexOf(status) > -1) return "b-progress";
-  if(["Contract Signed","Activated"].indexOf(status) > -1) return "b-active";
+  if(["Working on Contract","Waiting on approval","Contract Sent","Customer Processing","Ready to activate"].indexOf(status) > -1) return "b-progress";
+  if(["Contract Signed","Customer Confirmed","Activated"].indexOf(status) > -1) return "b-active";
   return "b-progress";
 }
 function rowStatusClass(d){
