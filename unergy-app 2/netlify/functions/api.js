@@ -6,7 +6,7 @@
 const crypto = require("crypto");
 const { getStore } = require("@netlify/blobs");
 
-const API_VERSION = "2026-11-09-save";
+const API_VERSION = "2026-11-09-files";
 const SECRET = process.env.SESSION_SECRET || "change-this-secret-before-real-use";
 const store = () => getStore({
   name: "unergy-data",
@@ -239,9 +239,11 @@ function verifyToken(token) {
 }
 
 // ---------- bootstrap (first-run defaults) ----------
+let BOOTSTRAPPED = false; // once this server instance has seen the data exist, skip the re-check on later requests
 async function bootstrapIfNeeded() {
+  if (BOOTSTRAPPED) return;
   const team = await getJSON("admin-team");
-  if (team) return;
+  if (team) { BOOTSTRAPPED = true; return; }
   const adminSalt = randomSalt(), demoSalt = randomSalt();
   const adminHash = hashPassword("Unergy2026!", adminSalt);
   const demoHash = hashPassword("password123", demoSalt);
@@ -252,7 +254,7 @@ async function bootstrapIfNeeded() {
 
   const seedCo = {
     id: coId, name: "SunSaver", submitCode, apiKey: crypto.randomBytes(20).toString("hex"),
-    vppFormEnabled: true, energyFormEnabled: false, energyFormCode: null,
+    vppFormEnabled: true, energyFormEnabled: false, energyFormCode: null, filesMigrated: true,
     people: [{ id: demoId, name: "Demo Reviewer", email: "demo@sunsaver.com" }],
   };
   await setJSON("admin-team", [{ id: adminId, name: "UNERGY Admin", email: "admin@unergypowercompany.com" }]);
@@ -269,6 +271,7 @@ async function bootstrapIfNeeded() {
   await setJSON("submitcode-" + submitCode, { companyId: coId, companyName: "SunSaver" });
   await setJSON("apikey-" + seedCo.apiKey, { companyId: coId, companyName: "SunSaver" });
   await setJSON("deals-" + coId, []);
+  BOOTSTRAPPED = true;
 }
 
 // ---------- authorization helpers ----------
@@ -302,6 +305,7 @@ async function snapshotAllData() {
   const data = {};
   for (const k of keys) {
     if (k.startsWith("backup-") || k === "backup-index") continue; // never back up the backups themselves
+    if (k.startsWith("file-") || k.startsWith("premigration-")) continue; // photo files are stored separately and never changed in place
     data[k] = await getJSON(k);
   }
   return data;
@@ -328,7 +332,7 @@ async function maybeAutoBackupToday(actorLabel) {
 function stripPeopleSecrets(companies) {
   return companies.map((c) => ({
     id: c.id, name: c.name, submitCode: c.submitCode, apiKey: c.apiKey || null, notifyEmail: c.notifyEmail || "",
-    vppFormEnabled: c.vppFormEnabled !== false, energyFormCode: c.energyFormCode || null, energyFormEnabled: !!c.energyFormEnabled,
+    vppFormEnabled: c.vppFormEnabled !== false, energyFormCode: c.energyFormCode || null, energyFormEnabled: !!c.energyFormEnabled, filesMigrated: !!c.filesMigrated,
     people: (c.people || []).map((p) => ({ id: p.id, name: p.name, email: p.email })),
   }));
 }
@@ -370,15 +374,37 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// ---------- keeping list responses small: photos/PDFs travel separately ----------
-// Account lists used to ship every uploaded bill/income photo inside the list itself,
-// which grows past what one response can carry (Netlify caps it near 6MB). Lists now
-// carry a tiny placeholder instead, and the real file is fetched when an account is opened.
+// ---------- photos/PDFs are stored on their own, never inside an account list ----------
+// An account used to carry its bill/income photo inside the partner's data file, so every save had to
+// read and rewrite every photo that partner had ever uploaded — slow enough to time out (a 502).
+// Now an account holds only a small reference ({ fileKey, name, type }); the photo lives in its own
+// storage entry and is fetched only when someone opens that account. Older accounts that still carry
+// the photo inline keep working exactly as before until the one-time "move photos" step runs.
 const FILE_FIELDS = ["billFile", "incomeVerificationFile"];
+const FILE_SUFFIX = { billFile: "bill", incomeVerificationFile: "income" };
+async function externalizeFile(dealId, field, f) {
+  if (!f || !f.dataUrl) return f || null;   // nothing to move: empty, a reference, or a placeholder
+  const key = "file-" + dealId + "-" + FILE_SUFFIX[field] + "-" + Date.now().toString(36) + crypto.randomBytes(2).toString("hex");
+  await setJSON(key, { name: f.name, type: f.type, dataUrl: f.dataUrl });
+  return { fileKey: key, name: f.name, type: f.type };
+}
+async function externalizeDealFiles(deal) {
+  const o = { ...deal };
+  for (const f of FILE_FIELDS) {
+    if (o[f] && o[f].dataUrl) o[f] = await externalizeFile(o.id, f, o[f]);
+  }
+  return o;
+}
+async function resolveFile(f) {
+  if (!f) return null;
+  if (f.dataUrl) return f;                                   // older account: photo still inline
+  if (f.fileKey) return (await getJSON(f.fileKey)) || null;  // newer account: fetch it from its own entry
+  return null;
+}
 function stubDealFiles(d, isAdmin) {
   const o = { ...d };
   for (const f of FILE_FIELDS) {
-    if (o[f] && o[f].dataUrl) o[f] = { stub: true, name: o[f].name, type: o[f].type };
+    if (o[f] && (o[f].dataUrl || o[f].fileKey)) o[f] = { stub: true, name: o[f].name, type: o[f].type };
   }
   if (!isAdmin) delete o.incomeVerificationFile; // admin-only data — never sent to partner browsers
   return o;
@@ -423,7 +449,7 @@ function validateBillFile(billFile) {
 }
 
 // ---------- main handler ----------
-exports.handler = async (event) => {
+async function handle(event) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -566,7 +592,7 @@ exports.handler = async (event) => {
         const companies = (await getJSON("companies")) || [];
         const submitCode = await genUniqueSubmitCode();
         const apiKey = crypto.randomBytes(20).toString("hex");
-        const co = { id: "co_" + crypto.randomBytes(4).toString("hex"), name: p.name, submitCode, apiKey, vppFormEnabled: true, energyFormEnabled: false, energyFormCode: null, people: [] };
+        const co = { id: "co_" + crypto.randomBytes(4).toString("hex"), name: p.name, submitCode, apiKey, vppFormEnabled: true, energyFormEnabled: false, energyFormCode: null, filesMigrated: true, people: [] };
         companies.push(co);
         await setJSON("companies", companies);
         await setJSON("submitcode-" + submitCode, { companyId: co.id, companyName: co.name });
@@ -845,18 +871,19 @@ exports.handler = async (event) => {
       case "getAllDeals": {
         requireAdmin(session);
         const companies = (await getJSON("companies")) || [];
+        const lists = await Promise.all(companies.map((co) => getJSON("deals-" + co.id)));
         let all = [];
-        for (const co of companies) {
-          const deals = (await getJSON("deals-" + co.id)) || [];
-          all = all.concat(deals);
-        }
+        lists.forEach((l) => { all = all.concat(l || []); });
         return ok(cors, { deals: all.map((d) => stubDealFiles(d, true)) });
       }
 
       case "setDeals": {
         requireCompanyAccess(session, p.companyId);
         const existingDeals = (await getJSON("deals-" + p.companyId)) || [];
-        await setJSON("deals-" + p.companyId, restoreStubbedFiles(p.deals || [], existingDeals));
+        const restored = restoreStubbedFiles(p.deals || [], existingDeals);
+        const finalDeals = [];
+        for (const d of restored) finalDeals.push(await externalizeDealFiles(d));
+        await setJSON("deals-" + p.companyId, finalDeals);
         return ok(cors, { done: true });
       }
 
@@ -875,14 +902,18 @@ exports.handler = async (event) => {
         const merged = { ...before, ...patch };
         merged.id = before.id;                   // identity can't be changed by an edit
         merged.companyId = before.companyId;
-        for (const f of FILE_FIELDS) {           // a "photo omitted" placeholder never overwrites the stored photo
-          if (merged[f] && merged[f].stub === true) merged[f] = before[f] || null;
+        for (const f of FILE_FIELDS) {
+          if (!(f in patch)) continue;
+          const v = patch[f];
+          if (v && v.stub === true) merged[f] = before[f] || null;                    // placeholder: keep what's stored
+          else if (v && v.dataUrl) merged[f] = await externalizeFile(before.id, f, v); // a genuinely new photo gets its own entry
         }
         deals[idx] = merged;
-        await setJSON("deals-" + companyId, deals);
+        const writes = [setJSON("deals-" + companyId, deals)];
         if (patch.status && patch.status !== before.status) {
-          await logActivity("action", session.personName || session.personEmail, "Changed status for " + (before.customerName || dealId) + ": " + (before.status || "—") + " → " + patch.status);
+          writes.push(logActivity("action", session.personName || session.personEmail, "Changed status for " + (before.customerName || dealId) + ": " + (before.status || "—") + " → " + patch.status));
         }
+        await Promise.all(writes);
         return ok(cors, { deal: stubDealFiles(merged, true) });
       }
 
@@ -895,11 +926,47 @@ exports.handler = async (event) => {
         if (!companies.find((c) => c.id === companyId)) { const e = new Error("Partner not found"); e.status = 404; throw e; }
         const deals = (await getJSON("deals-" + companyId)) || [];
         if (!deals.some((d) => d.id === deal.id)) {
-          deals.push({ ...deal, companyId });
+          deals.push({ ...(await externalizeDealFiles(deal)), companyId });
           await setJSON("deals-" + companyId, deals);
           await logActivity("action", session.personName || session.personEmail, "Added account: " + (deal.customerName || deal.id));
         }
         return ok(cors, { done: true });
+      }
+
+      // One-time, safe move of photos that are still stored inside account lists. Handles one partner at a
+      // time and only a handful of photos per call; the page simply calls it again until it reports done.
+      // A full copy of each partner's list is kept (premigration-…) before anything is changed.
+      case "migrateStorage": {
+        requireAdmin(session);
+        const companies = (await getJSON("companies")) || [];
+        const leftCos = () => companies.filter((c) => !c.filesMigrated).length;
+        const co = companies.find((c) => !c.filesMigrated);
+        if (!co) return ok(cors, { done: true, remainingCompanies: 0, remainingFiles: 0 });
+        const key = "deals-" + co.id;
+        const deals = (await getJSON(key)) || [];
+        const legacy = [];
+        deals.forEach((d, i) => FILE_FIELDS.forEach((f) => { if (d[f] && d[f].dataUrl) legacy.push([i, f]); }));
+        if (!legacy.length) {
+          co.filesMigrated = true;
+          await setJSON("companies", companies);
+          return ok(cors, { done: leftCos() === 0, company: co.name, step: "checked", remainingCompanies: leftCos(), remainingFiles: 0 });
+        }
+        if (!co.premigrationCopy) {
+          await setJSON("premigration-" + key, deals);
+          co.premigrationCopy = true;
+          await setJSON("companies", companies);
+          return ok(cors, { done: false, company: co.name, step: "safety-copy", remainingCompanies: leftCos(), remainingFiles: legacy.length });
+        }
+        const batch = legacy.slice(0, 6);
+        await Promise.all(batch.map(async ([i, f]) => { deals[i][f] = await externalizeFile(deals[i].id, f, deals[i][f]); }));
+        await setJSON(key, deals);
+        const left = legacy.length - batch.length;
+        if (left === 0) {
+          co.filesMigrated = true;
+          await setJSON("companies", companies);
+          await logActivity("action", session.personName || session.personEmail, "Moved uploaded photos into separate storage for " + co.name);
+        }
+        return ok(cors, { done: left === 0 && leftCos() === 0, company: co.name, step: "moved", moved: batch.length, remainingCompanies: leftCos(), remainingFiles: left });
       }
 
       case "getDealFiles": {
@@ -908,8 +975,8 @@ exports.handler = async (event) => {
         const d = deals.find((x) => x.id === p.dealId);
         if (!d || (session.role !== "admin" && d.hiddenFromPartner)) { const e = new Error("Account not found"); e.status = 404; throw e; }
         return ok(cors, {
-          billFile: d.billFile || null,
-          incomeVerificationFile: session.role === "admin" ? (d.incomeVerificationFile || null) : null,
+          billFile: await resolveFile(d.billFile),
+          incomeVerificationFile: session.role === "admin" ? await resolveFile(d.incomeVerificationFile) : null,
         });
       }
 
@@ -997,7 +1064,7 @@ exports.handler = async (event) => {
         // partner-rep or partner-review submitting a new lead for their own company
         if (!session || session.role === "admin") { const e = new Error("Unauthorized"); e.status = 401; throw e; }
         const deals = (await getJSON("deals-" + session.companyId)) || [];
-        deals.push(p.deal);
+        deals.push(await externalizeDealFiles(p.deal));
         await setJSON("deals-" + session.companyId, deals);
         const companiesForNotify = (await getJSON("companies")) || [];
         const coForNotify = companiesForNotify.find((c) => c.id === session.companyId);
@@ -1041,7 +1108,8 @@ exports.handler = async (event) => {
         requireAdmin(session);
         const companies = (await getJSON("companies")) || [];
         const byCompany = {};
-        for (const co of companies) byCompany[co.id] = (await getJSON("msgs-" + co.id)) || [];
+        const msgLists = await Promise.all(companies.map((co) => getJSON("msgs-" + co.id)));
+        companies.forEach((co, i) => { byCompany[co.id] = msgLists[i] || []; });
         return ok(cors, { messagesByCompany: byCompany });
       }
 
@@ -1085,7 +1153,7 @@ exports.handler = async (event) => {
           createdAt: now, updatedAt: now, createdBy: "API — " + session.companyName, updatedBy: "API — " + session.companyName,
         };
         const deals = (await getJSON("deals-" + session.companyId)) || [];
-        deals.push(newAccount);
+        deals.push(await externalizeDealFiles(newAccount));
         await setJSON("deals-" + session.companyId, deals);
         const notifs = (await getJSON("notif-admin")) || [];
         notifs.unshift({ id: "ntf_" + crypto.randomBytes(4).toString("hex"), message: session.companyName + " submitted a new client via API: " + newAccount.customerName, createdAt: now, read: false });
@@ -1119,6 +1187,18 @@ exports.handler = async (event) => {
   } catch (err) {
     return { statusCode: err.status || 500, headers: cors, body: JSON.stringify({ error: err.message || "Server error" }) };
   }
+}
+
+// Wraps every request so how long it took shows up in the Netlify function log (Logs & metrics → Functions → api).
+exports.handler = async (event) => {
+  const t0 = Date.now();
+  const res = await handle(event);
+  try {
+    let a = "";
+    try { a = JSON.parse(event.body || "{}").action || ""; } catch (e) {}
+    console.log(JSON.stringify({ method: event.httpMethod, action: a, status: res.statusCode, ms: Date.now() - t0 }));
+  } catch (e) {}
+  return res;
 };
 
 function ok(cors, data) {
