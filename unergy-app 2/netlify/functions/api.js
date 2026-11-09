@@ -6,7 +6,7 @@
 const crypto = require("crypto");
 const { getStore } = require("@netlify/blobs");
 
-const API_VERSION = "2026-10-05-status";
+const API_VERSION = "2026-11-09-save";
 const SECRET = process.env.SESSION_SECRET || "change-this-secret-before-real-use";
 const store = () => getStore({
   name: "unergy-data",
@@ -857,6 +857,48 @@ exports.handler = async (event) => {
         requireCompanyAccess(session, p.companyId);
         const existingDeals = (await getJSON("deals-" + p.companyId)) || [];
         await setJSON("deals-" + p.companyId, restoreStubbedFiles(p.deals || [], existingDeals));
+        return ok(cors, { done: true });
+      }
+
+      // Save ONE customer. The page used to download a company's whole account list, change one
+      // entry and upload the entire list again — slow, size-limited, and easy to fail or collide
+      // with someone else's change. This changes just that one account, on the server.
+      case "updateDeal": {
+        requireAdmin(session);
+        const { companyId, dealId } = p;
+        const patch = p.patch || {};
+        if (!companyId || !dealId) { const e = new Error("Missing companyId or dealId"); e.status = 400; throw e; }
+        const deals = (await getJSON("deals-" + companyId)) || [];
+        const idx = deals.findIndex((d) => d.id === dealId);
+        if (idx === -1) { const e = new Error("Account not found"); e.status = 404; throw e; }
+        const before = deals[idx];
+        const merged = { ...before, ...patch };
+        merged.id = before.id;                   // identity can't be changed by an edit
+        merged.companyId = before.companyId;
+        for (const f of FILE_FIELDS) {           // a "photo omitted" placeholder never overwrites the stored photo
+          if (merged[f] && merged[f].stub === true) merged[f] = before[f] || null;
+        }
+        deals[idx] = merged;
+        await setJSON("deals-" + companyId, deals);
+        if (patch.status && patch.status !== before.status) {
+          await logActivity("action", session.personName || session.personEmail, "Changed status for " + (before.customerName || dealId) + ": " + (before.status || "—") + " → " + patch.status);
+        }
+        return ok(cors, { deal: stubDealFiles(merged, true) });
+      }
+
+      // Add ONE customer (admin). Safe to retry: the same id is never added twice.
+      case "addDeal": {
+        requireAdmin(session);
+        const { companyId, deal } = p;
+        if (!companyId || !deal || !deal.id) { const e = new Error("Missing companyId or account"); e.status = 400; throw e; }
+        const companies = (await getJSON("companies")) || [];
+        if (!companies.find((c) => c.id === companyId)) { const e = new Error("Partner not found"); e.status = 404; throw e; }
+        const deals = (await getJSON("deals-" + companyId)) || [];
+        if (!deals.some((d) => d.id === deal.id)) {
+          deals.push({ ...deal, companyId });
+          await setJSON("deals-" + companyId, deals);
+          await logActivity("action", session.personName || session.personEmail, "Added account: " + (deal.customerName || deal.id));
+        }
         return ok(cors, { done: true });
       }
 
