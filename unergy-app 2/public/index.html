@@ -258,6 +258,9 @@ function optionsHtml(list, selected, includeBlank){
    token before returning or changing anything. The browser never holds
    another company's data, a password, or a password hash. */
 var API_BASE = "/api";
+// Shown in the footer so it's obvious which files are actually live. Bumped whenever the files change.
+var PAGE_VERSION = "2026-11-09-c";
+var EXPECTED_SERVER_VERSION = "2026-11-09-save";
 function apiCall(action, params){
   var headers = {"Content-Type":"application/json"};
   if(APP.authToken) headers["Authorization"] = "Bearer " + APP.authToken;
@@ -268,6 +271,33 @@ function apiCall(action, params){
         return data;
       });
     });
+}
+// Retry a save a couple of times when the failure looks temporary (a dropped request or a server hiccup).
+// Only used for saves that are safe to repeat; "not found", "forbidden" etc. are reported straight away.
+function apiCallRetry(action, params, tries){
+  tries = tries || 3;
+  return apiCall(action, params).catch(function(err){
+    var m = (err && err.message) || "";
+    if(tries <= 1 || /unauthorized|forbidden|not found|missing|invalid|required/i.test(m)) throw err;
+    return new Promise(function(resolve){ setTimeout(resolve, 800); }).then(function(){ return apiCallRetry(action, params, tries - 1); });
+  });
+}
+// A failed save now says what actually went wrong, instead of one generic line every time.
+function saveFailed(err){
+  APP.saveErr = true;
+  var m = (err && err.message) || "";
+  if(/failed to fetch|networkerror|load failed/i.test(m)) m = "the request didn't reach the server (check your connection and try again)";
+  else if(/^request failed \((5\d\d)\)/i.test(m)) m = "the server had a problem (" + m.replace(/^request failed /i, "").replace(/[()]/g, "") + ") — please try again";
+  APP.saveErrMsg = m || "check your connection";
+  renderApp();
+}
+// When saving an edit, photos that weren't touched go as a tiny placeholder instead of being re-uploaded.
+function patchForSave(updated, original){
+  var patch = Object.assign({}, updated);
+  ["billFile","incomeVerificationFile"].forEach(function(f){
+    if(patch[f] && patch[f].dataUrl && patch[f] === original[f]) patch[f] = {stub:true, name:patch[f].name, type:patch[f].type};
+  });
+  return patch;
 }
 function notifScopeForSession(){
   if(!APP.session) return null;
@@ -583,7 +613,7 @@ function confirmImport(){
 
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
-var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, statusMenuOpen:false, searchQuery:"" };
+var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, statusMenuOpen:false, serverVersion:null, serverStorageError:null, searchQuery:"" };
 var gridRefreshTimer = null;
 var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
@@ -593,13 +623,38 @@ var pendingIncomeFile = null;
 var pendingBillingLog = null;
 
 /* ============ RENDER ============ */
+function versionLineHtml(){
+  var sv = APP.serverVersion;
+  var h = '<div class="footer-note" style="margin-top:4px;">Page ' + PAGE_VERSION + ' · Server ' + esc(sv === null ? "checking…" : sv);
+  if(sv === "unreachable"){
+    h += ' <span style="color:var(--red);font-weight:600;">— couldn\'t reach the server to check.</span>';
+  } else if(sv !== null && sv.indexOf(EXPECTED_SERVER_VERSION) !== 0){
+    h += ' <span style="color:var(--red);font-weight:600;">— this doesn\'t match the page. Upload the latest api.js and redeploy.</span>';
+  }
+  if(APP.serverStorageError){
+    h += '<br><span style="color:var(--red);font-weight:600;">The server can\'t reach its storage right now: ' + esc(APP.serverStorageError) + '</span>';
+  }
+  return h + '</div>';
+}
+// Asks the server which version it is (the status page added to api.js). An older api.js has no status page.
+function loadServerVersion(){
+  fetch(API_BASE).then(function(r){ return r.text(); }).then(function(t){
+    var v = "old (no status page)";
+    try{
+      var j = JSON.parse(t);
+      if(j && j.apiVersion){ v = j.apiVersion; if(j.storage && j.storage.ok === false) APP.serverStorageError = j.storage.error || "unknown error"; }
+    }catch(e){}
+    APP.serverVersion = v;
+    renderAppWhenIdle();
+  }).catch(function(){ APP.serverVersion = "unreachable"; renderAppWhenIdle(); });
+}
 function renderApp(){
   document.body.classList.toggle("app-authed", !!APP.session);
   var html = buildTopbar();
   if(!APP.session) html += buildLoginGate();
   else if(APP.session.role === "admin") html += buildAdminView();
   else html += buildPartnerView();
-  html += '<div class="footer-note">Access codes are a front-end gate, not encrypted login — treat them like a shared password. Each portal only ever loads its own company\'s data from storage.</div>';
+  html += '<div class="footer-note">Access codes are a front-end gate, not encrypted login — treat them like a shared password. Each portal only ever loads its own company\'s data from storage.</div>' + versionLineHtml();
   root.innerHTML = '<div class="app">' + html + '</div>';
 }
 
@@ -755,7 +810,7 @@ function buildAdminView(){
     '<button class="btn-teal btn-small" data-action="open-add-deal">+ Add account</button>' +
     '</div></div>';
 
-  if(APP.saveErr) html += '<div class="err" style="margin-bottom:12px;">Last change may not have saved — check your connection.</div>';
+  if(APP.saveErr) html += '<div class="err" style="margin-bottom:12px;">Last change may not have saved — '+esc(APP.saveErrMsg || "check your connection")+'.</div>';
 
   if(filtered.length === 0){
     html += '<div class="empty"><div class="big">No accounts match this filter</div><div>Add one manually, or wait for a partner to submit a lead.</div></div>';
@@ -791,6 +846,24 @@ function gridNiceLabel(key){
   return String(key).replace(/_/g," ").replace(/\b\w/g, function(c){ return c.toUpperCase(); });
 }
 var APP_GRID = { status:"idle", price:null, priceLabel:null, priceSeries:[], load:null, netLoad:null, mainSource:null, fuelSeries:[], fuelKeys:[], fetchedAt:null };
+// Rebuilding the whole page while someone is using a dropdown or typing throws away what they're doing —
+// an open status dropdown vanishes and the pick is lost, with no error. Background refreshes (live updates,
+// grid numbers) therefore wait for a quiet moment instead, and the search box keeps your cursor.
+function renderAppWhenIdle(){
+  var a = document.activeElement;
+  var tag = (a && a.tagName) ? a.tagName.toUpperCase() : "";
+  var inPage = !!(a && root.contains(a));
+  if(inPage && a.id === "search-query"){
+    var pos = a.selectionStart;
+    renderApp();
+    var again = document.getElementById("search-query");
+    if(again){ again.focus(); try{ again.setSelectionRange(pos, pos); }catch(e){} }
+    return;
+  }
+  if(APP.statusMenuOpen) return;
+  if(inPage && (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA")) return;
+  renderApp();
+}
 function fetchGridData(){
   if(APP_GRID.status === "idle") APP_GRID.status = "loading";
   apiCall("getGridStatus", {}).then(function(res){
@@ -798,7 +871,7 @@ function fetchGridData(){
       // Keep any previously-loaded data on screen — a single failed refresh
       // (e.g. a temporary rate limit) shouldn't blank out good numbers.
       if(APP_GRID.status === "loading") APP_GRID.status = "error";
-      renderApp();
+      renderAppWhenIdle();
       return;
     }
     APP_GRID.status = "ok";
@@ -813,10 +886,10 @@ function fetchGridData(){
     if(res.fuelSeries && res.fuelSeries.length) APP_GRID.fuelSeries = res.fuelSeries;
     if(res.fuelKeys && res.fuelKeys.length) APP_GRID.fuelKeys = res.fuelKeys;
     APP_GRID.fetchedAt = res.fetchedAt;
-    renderApp();
+    renderAppWhenIdle();
   }).catch(function(){
     if(APP_GRID.status === "loading") APP_GRID.status = "error";
-    renderApp();
+    renderAppWhenIdle();
   });
 }
 function startGridRefresh(){
@@ -885,7 +958,7 @@ function pollLiveUpdates(){
     // The data is still refreshed underneath; it'll show as soon as
     // they switch tabs or the form is submitted.
     var formInProgress = APP.session && APP.session.role !== "admin" && APP.partnerTab === "submit";
-    if(!formInProgress) renderApp();
+    if(!formInProgress) renderAppWhenIdle();
   });
 }
 function startLiveUpdatePolling(){
@@ -1020,7 +1093,7 @@ function buildPartnerView(){
     '<input id="search-query" placeholder="Search customer, address, email, phone…" value="'+esc(APP.searchQuery||"")+'" style="width:auto;min-width:240px;">' +
     statusMenuHtml(APP.deals) +
     '</div></div>';
-  if(APP.saveErr) html += '<div class="err" style="margin-bottom:12px;">Last change may not have saved — check your connection.</div>';
+  if(APP.saveErr) html += '<div class="err" style="margin-bottom:12px;">Last change may not have saved — '+esc(APP.saveErrMsg || "check your connection")+'.</div>';
   if(deals.length === 0){
     if(APP.deals.length > 0){
       html += '<div class="empty"><div class="big">No accounts match your filters</div><div><a class="linklike" data-action="clear-filters">Clear search &amp; status filter</a></div></div>';
@@ -1494,10 +1567,7 @@ function saveEditDeal(dealId){
   updated.updatedBy = actorLabel();
   var statusChanged = deal.status !== updated.status;
   var visibilityChanged = !!deal.hiddenFromPartner !== !!updated.hiddenFromPartner;
-  apiCall("getDeals", {companyId: companyId}).then(function(res){
-    var arr = (res.deals || []).map(function(d){ return d.id === dealId ? updated : d; });
-    return apiCall("setDeals", {companyId: companyId, deals: arr});
-  }).then(function(){
+  apiCallRetry("updateDeal", {companyId: companyId, dealId: dealId, patch: patchForSave(updated, deal)}).then(function(){
     APP.saveErr = false;
     APP.deals = APP.deals.map(function(d){ return d.id === dealId ? updated : d; });
     closeModal();
@@ -1512,7 +1582,7 @@ function saveEditDeal(dealId){
           ('UNERGY updated the account for '+(updated.customerName||"a client")+" — by "+actorLabel()));
       pushNotification(companyId, msg);
     }
-  }).catch(function(){ APP.saveErr = true; renderApp(); });
+  }).catch(saveFailed);
 }
 function deleteDealPermanently(dealId){
   var deal = APP.deals.filter(function(d){ return d.id === dealId; })[0];
@@ -1573,16 +1643,13 @@ function saveAddDeal(){
   data.companyId = companyId;
   data.createdBy = actorLabel();
   if(!data.customerName || !data.customerName.trim() || !companyId) return;
-  apiCall("getDeals", {companyId: companyId}).then(function(res){
-    var arr = (res.deals || []).concat([data]);
-    return apiCall("setDeals", {companyId: companyId, deals: arr});
-  }).then(function(){
+  apiCallRetry("addDeal", {companyId: companyId, deal: data}).then(function(){
     APP.saveErr = false;
     APP.deals.push(data);
     closeModal();
     renderApp();
     pushNotification(companyId, "UNERGY added a new account for you: "+(data.customerName||"a client")+" — by "+actorLabel());
-  }).catch(function(){ APP.saveErr = true; renderApp(); });
+  }).catch(saveFailed);
 }
 
 /* ============ PARTNER/REP: submit a client ============ */
@@ -1651,7 +1718,7 @@ function savePartnerAddDeal(){
       var s = document.getElementById("submit-success");
       if(s) s.innerHTML = '<div class="success-box">Client submitted — UNERGY will follow up.</div>';
     }
-  }).catch(function(){ APP.saveErr = true; renderApp(); });
+  }).catch(saveFailed);
 }
 
 /* ============ Notifications ============ */
@@ -2492,15 +2559,13 @@ document.addEventListener("change", function(e){
     var companyId = deal.companyId;
     var custName = deal.customerName;
     var who = actorLabel();
-    apiCall("getDeals", {companyId: companyId}).then(function(res){
-      var arr = (res.deals || []).map(function(d){ return d.id === dealId ? Object.assign({}, d, {status:newStatus, updatedAt:new Date().toISOString(), updatedBy:who}) : d; });
-      return apiCall("setDeals", {companyId: companyId, deals: arr});
-    }).then(function(){
+    var nowIso = new Date().toISOString();
+    apiCallRetry("updateDeal", {companyId: companyId, dealId: dealId, patch: {status:newStatus, updatedAt:nowIso, updatedBy:who}}).then(function(){
       APP.saveErr = false;
-      APP.deals = APP.deals.map(function(d){ return d.id === dealId ? Object.assign({}, d, {status:newStatus, updatedAt:new Date().toISOString(), updatedBy:who}) : d; });
+      APP.deals = APP.deals.map(function(d){ return d.id === dealId ? Object.assign({}, d, {status:newStatus, updatedAt:nowIso, updatedBy:who}) : d; });
       renderApp();
       pushNotification(companyId, 'Status changed to "'+newStatus+'" for '+(custName||"a client")+" — by "+who);
-    }).catch(function(){ APP.saveErr = true; renderApp(); });
+    }).catch(saveFailed);
   }
 });
 
@@ -2508,6 +2573,7 @@ document.addEventListener("change", function(e){
 /* refresh doesn't force a fresh login; otherwise nothing is fetched until   */
 /* a login action fires.                                                    */
 APP.filterCo = "all"; APP.filterStatuses = null;
+loadServerVersion();
 (function tryRestoreSession(){
   var saved = loadSavedSession();
   if(!saved || !saved.token || !saved.session){ renderApp(); return; }
