@@ -763,7 +763,7 @@ function buildAdminView(){
     html += '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Partner</th><th>Service address</th><th>Solar/Battery</th><th>Previous REP</th><th>Status</th><th>Payment status</th><th>Updated</th><th></th></tr></thead><tbody>';
     filtered.forEach(function(d){
       html += '<tr class="'+rowStatusClass(d)+'">' +
-        '<td><strong>'+esc(d.customerName || "—")+'</strong><div class="small">'+esc(d.phone)+'</div></td>' +
+        '<td><strong>'+esc(d.customerName || "—")+'</strong><div class="small" style="overflow-wrap:anywhere;">'+esc(d.email)+'</div></td>' +
         '<td class="company-tag">'+esc(companyName(d.companyId))+'</td>' +
         '<td>'+esc(d.serviceAddress || "—")+'</td>' +
         '<td>'+esc(d.solarBattery)+'</td>' +
@@ -1031,7 +1031,7 @@ function buildPartnerView(){
     html += '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Service address</th><th>Solar/Battery</th><th>Battery brand</th><th>Status</th><th>Payment status</th><th>VPP enabled</th><th>Updated</th><th></th></tr></thead><tbody>';
     deals.forEach(function(d){
       html += '<tr class="'+rowStatusClass(d)+'">' +
-        '<td><strong>'+esc(d.customerName || "—")+'</strong><div class="small">'+esc(d.phone)+'</div></td>' +
+        '<td><strong>'+esc(d.customerName || "—")+'</strong><div class="small" style="overflow-wrap:anywhere;">'+esc(d.email)+'</div></td>' +
         '<td>'+esc(d.serviceAddress || "—")+'</td>' +
         '<td>'+esc(d.solarBattery)+'</td>' +
         '<td>'+esc(d.batteryBrand || "—")+'</td>' +
