@@ -259,8 +259,8 @@ function optionsHtml(list, selected, includeBlank){
    another company's data, a password, or a password hash. */
 var API_BASE = "/api";
 // Shown in the footer so it's obvious which files are actually live. Bumped whenever the files change.
-var PAGE_VERSION = "2026-11-09-c";
-var EXPECTED_SERVER_VERSION = "2026-11-09-save";
+var PAGE_VERSION = "2026-11-09-d";
+var EXPECTED_SERVER_VERSION = "2026-11-09-files";
 function apiCall(action, params){
   var headers = {"Content-Type":"application/json"};
   if(APP.authToken) headers["Authorization"] = "Bearer " + APP.authToken;
@@ -613,7 +613,7 @@ function confirmImport(){
 
 /* ============ APP STATE ============ */
 // Nothing is fetched from storage until a login action is attempted — the page loads empty.
-var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, statusMenuOpen:false, serverVersion:null, serverStorageError:null, searchQuery:"" };
+var APP = { session: null, authToken: null, companies: [], deals: [], loginErr:"", showAdminField:false, partnerTab:"review", reviewSubmitFormType:"vpp", loginFlow:"submit", notifications: [], messagesByCompany: {}, activeMsgCompany: null, adminTeam: [], trash: [], backups: [], activityLog: [], filterCo:"all", filterStatuses:null, statusMenuOpen:false, serverVersion:null, serverStorageError:null, migrating:false, migrateMsg:"", searchQuery:"" };
 var gridRefreshTimer = null;
 var root = document.getElementById("root");
 var modalLayer = document.getElementById("modal-layer");
@@ -623,6 +623,47 @@ var pendingIncomeFile = null;
 var pendingBillingLog = null;
 
 /* ============ RENDER ============ */
+// One-time, safe move of uploaded photos into their own storage so saving stays fast (admin only).
+function migrationBannerHtml(){
+  if(!APP.session || APP.session.role !== "admin") return "";
+  var needs = (APP.companies || []).some(function(c){ return c.filesMigrated === false; });
+  if(!needs && !APP.migrateMsg) return "";
+  var h = '<div class="panel-box" style="margin-bottom:12px;border:1px solid var(--amber);">';
+  if(APP.migrating){
+    h += '<strong>Speeding up saving…</strong><div class="small" style="margin-top:4px;">' + esc(APP.migrateMsg) + ' Please keep this page open and avoid editing accounts until it finishes.</div>';
+  } else {
+    h += '<strong>One-time step to make saving fast and reliable</strong>' +
+      '<div class="small" style="margin:4px 0 8px;">Uploaded bill and income photos are still stored inside each partner\'s account list, which makes every save slow. ' +
+      'This moves them into their own storage. A full safety copy of your data is kept first, and nothing is deleted. It takes a minute or two.</div>' +
+      (APP.migrateMsg ? '<div class="small" style="margin-bottom:8px;color:var(--red);">' + esc(APP.migrateMsg) + '</div>' : '') +
+      '<button class="btn-teal btn-small" data-action="migrate-storage">Speed up saving</button>';
+  }
+  return h + '</div>';
+}
+function runStorageMigration(){
+  if(APP.migrating) return;
+  APP.migrating = true; APP.migrateMsg = "Starting…"; renderApp();
+  function step(failures){
+    return apiCall("migrateStorage", {}).then(function(res){
+      if(res.done){
+        return apiCall("getCompanies").then(function(r){
+          APP.companies = r.companies || APP.companies;
+          APP.migrating = false; APP.migrateMsg = ""; renderApp();
+        });
+      }
+      APP.migrateMsg = (res.step === "safety-copy" ? "Making a safety copy of " : "Moving photos for ") + (res.company || "your data") +
+        (res.remainingFiles ? " — " + res.remainingFiles + " photo" + (res.remainingFiles === 1 ? "" : "s") + " left" : "") + ".";
+      renderApp();
+      return step(0);
+    }).catch(function(err){
+      if(failures < 2) return new Promise(function(resolve){ setTimeout(resolve, 1500); }).then(function(){ return step(failures + 1); });
+      APP.migrating = false;
+      APP.migrateMsg = "Stopped: " + ((err && err.message) || "a problem came up") + ". Nothing was lost — press the button to continue where it left off.";
+      renderApp();
+    });
+  }
+  step(0);
+}
 function versionLineHtml(){
   var sv = APP.serverVersion;
   var h = '<div class="footer-note" style="margin-top:4px;">Page ' + PAGE_VERSION + ' · Server ' + esc(sv === null ? "checking…" : sv);
@@ -787,7 +828,7 @@ function buildAdminView(){
   APP.companies.forEach(function(c){ coOpts += '<option value="'+esc(c.id)+'"'+(APP.filterCo===c.id?" selected":"")+'>'+esc(c.name)+'</option>'; });
   var companyScoped = deals.filter(function(d){ return APP.filterCo === "all" || !APP.filterCo || d.companyId === APP.filterCo; });
 
-  var html = (APP.loadWarning ? '<div class="err" style="margin-bottom:12px;">'+esc(APP.loadWarning)+'</div>' : '') + buildGridWidget();
+  var html = (APP.loadWarning ? '<div class="err" style="margin-bottom:12px;">'+esc(APP.loadWarning)+'</div>' : '') + migrationBannerHtml() + buildGridWidget();
   html += '<div class="stats-row">' +
     stat(deals.length, "Total accounts") + stat(newCount, "New", "var(--amber)") +
     stat(activeCount, "In pipeline", "var(--teal)") + stat(activatedCount, "Active", "var(--green)") +
@@ -2407,6 +2448,7 @@ document.addEventListener("click", function(e){
   else if(action === "open-trash"){ openTrashModal(); }
   else if(action === "open-backups"){ openBackupsModal(); }
   else if(action === "open-activity-log"){ openActivityLogModal(); }
+  else if(action === "migrate-storage"){ runStorageMigration(); }
   else if(action === "toggle-status-menu"){ APP.statusMenuOpen = !APP.statusMenuOpen; renderApp(); }
   else if(action === "status-all"){ APP.filterStatuses = null; APP.statusMenuOpen = false; renderApp(); }
   else if(action === "status-pick"){
