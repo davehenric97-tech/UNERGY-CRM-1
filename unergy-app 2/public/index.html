@@ -204,7 +204,7 @@ body:not(.app-authed) .brand .sub{color:rgba(255,255,255,.75);}
 (function(){
 "use strict";
 
-var STATUSES = ["NEW","Missing Information","Missing Electric Bill","Working on Contract","Waiting on approval","Contract Sent","Contract Signed","Customer Processing","Customer Confirmed","Ready to activate","Activated","Will NOT send Contract","Cancelled"];
+var STATUSES = ["NEW","Missing Information","Missing Electric Bill","Working on Contract","Waiting on approval","Contract Sent","Contract Sent 2.0","Contract Signed","Customer Processing","Customer Confirmed","Ready to activate","Activated","Will NOT send Contract","Cancelled"];
 var SOLAR_BATTERY_OPTS = ["Solar and Battery","Solar","Battery Only","Non Solar"];
 var PROPERTY_TYPES = ["Residential","Commercial"];
 var MOVE_SWITCH = ["Move in","Switch"];
@@ -227,7 +227,7 @@ function esc(str){
 function badgeClass(status){
   if(status === "NEW") return "b-new";
   if(["Missing Information","Missing Electric Bill","Cancelled","Will NOT send Contract"].indexOf(status) > -1) return "b-warn";
-  if(["Working on Contract","Waiting on approval","Contract Sent","Customer Processing","Ready to activate"].indexOf(status) > -1) return "b-progress";
+  if(["Working on Contract","Waiting on approval","Contract Sent","Contract Sent 2.0","Customer Processing","Ready to activate"].indexOf(status) > -1) return "b-progress";
   if(["Contract Signed","Customer Confirmed","Activated"].indexOf(status) > -1) return "b-active";
   return "b-progress";
 }
@@ -259,7 +259,7 @@ function optionsHtml(list, selected, includeBlank){
    another company's data, a password, or a password hash. */
 var API_BASE = "/api";
 // Shown in the footer so it's obvious which files are actually live. Bumped whenever the files change.
-var PAGE_VERSION = "2026-11-09-d";
+var PAGE_VERSION = "2026-11-09-e";
 var EXPECTED_SERVER_VERSION = "2026-11-09-files";
 function apiCall(action, params){
   var headers = {"Content-Type":"application/json"};
